@@ -27,7 +27,7 @@ DOMAIN_FILE = CONFIG_DIR / 'domain'
 CA_FILE = APP_DIR / 'server-ca.pem'
 HELPER = '/usr/local/sbin/ikev2-panel-helper'
 USER_RE = re.compile(r'^[A-Za-z0-9_.-]{3,32}$')
-VPN_PASS_RE = re.compile(r'^[A-Za-z0-9_.!@#%+=:-]{12,128}$')
+VPN_PASS_RE = re.compile(r'^[A-Za-z0-9_.!@#%+=:-]{4,128}$')
 ADMIN_PASS_MIN = 14
 
 APP = Flask(__name__)
@@ -410,7 +410,7 @@ def portal_change_password():
     if not row or not isinstance(current,str) or not verify_password(current,row['portal_password_hash'] or ''):
         return jsonify(error='Current VPN password is incorrect.'), 400
     if not isinstance(new,str) or not VPN_PASS_RE.fullmatch(new):
-        return jsonify(error='New VPN password must be 12–128 supported characters.'), 400
+        return jsonify(error='New VPN password must be 4–128 supported characters.'), 400
     with connect() as con:
         con.execute('UPDATE vpn_users SET vpn_password=?,portal_password_hash=?,portal_password_changed=1 WHERE id=?',
                     (new,hash_password(new),user_id))
@@ -600,7 +600,7 @@ def create_user():
     if not USER_RE.fullmatch(username):
         return jsonify(error='نام کاربری باید ۳ تا ۳۲ نویسه و شامل حروف انگلیسی، عدد، نقطه، خط تیره یا زیرخط باشد.'), 400
     if not isinstance(password, str) or not VPN_PASS_RE.fullmatch(password):
-        return jsonify(error='رمز VPN باید ۱۲ تا ۱۲۸ نویسه و فقط شامل حروف انگلیسی، عدد و . _ ! @ # % + = : - باشد.'), 400
+        return jsonify(error='رمز VPN باید ۴ تا ۱۲۸ نویسه و فقط شامل حروف انگلیسی، عدد و . _ ! @ # % + = : - باشد.'), 400
     try:
         with connect() as con:
             con.execute('''INSERT INTO vpn_users(username,vpn_password,enabled,note,created_at,
@@ -671,7 +671,7 @@ def reset_vpn_password(user_id):
     data = request.get_json(silent=True) or {}
     password = data.get('password') or secrets.token_urlsafe(15)
     if not isinstance(password, str) or not VPN_PASS_RE.fullmatch(password):
-        return jsonify(error='رمز VPN باید ۱۲ تا ۱۲۸ نویسه و فقط شامل حروف انگلیسی، عدد و . _ ! @ # % + = : - باشد.'), 400
+        return jsonify(error='رمز VPN باید ۴ تا ۱۲۸ نویسه و فقط شامل حروف انگلیسی، عدد و . _ ! @ # % + = : - باشد.'), 400
     with connect() as con:
         row = con.execute('SELECT username,vpn_password FROM vpn_users WHERE id=?', (user_id,)).fetchone()
         if not row: return jsonify(error='کاربر پیدا نشد.'), 404

@@ -15,7 +15,7 @@ RADIUS_USERS_FILE = Path('/etc/freeradius/3.0/mods-config/files/authorize')
 WG_CONFIG = Path('/etc/wireguard/wg0.conf')
 SETUP_TOKEN_FILE = Path('/etc/ikev2-manager/setup-token')
 VALID_USER = re.compile(r'^[A-Za-z0-9_.-]{3,32}$')
-VALID_PASSWORD = re.compile(r'^[A-Za-z0-9_.!@#%+=:-]{12,128}$')
+VALID_PASSWORD = re.compile(r'^[A-Za-z0-9_.!@#%+=:-]{4,128}$')
 SWANCTL = '/usr/sbin/swanctl'
 
 def run(args, timeout=20):
