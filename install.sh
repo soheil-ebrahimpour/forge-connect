@@ -161,7 +161,8 @@ connections {
   ikev2-eap {
     version = 2
     local_addrs = %any
-    proposals = aes256-sha256-modp2048,aes128-sha256-modp2048
+    # Include AES-GCM + ECP groups so Windows built-in IKEv2 clients can negotiate.
+    proposals = aes256gcm16-prfsha256-ecp256,aes128gcm16-prfsha256-ecp256,aes256-sha256-modp2048,aes128-sha256-modp2048,aes256-sha1-modp1024,aes128-sha1-modp1024
     send_cert = always
     fragmentation = yes
     pools = $POOLS
@@ -178,7 +179,7 @@ connections {
     children {
       full-tunnel {
         local_ts = $TS
-        esp_proposals = aes256-sha256-modp2048,aes128-sha256-modp2048
+        esp_proposals = aes256gcm16-ecp256,aes128gcm16-ecp256,aes256-sha256,aes128-sha256,aes256-sha1,aes128-sha1
       }
     }
   }
@@ -218,7 +219,9 @@ python3 - "$RADIUS_SECRET" <<'PY'
 import pathlib,re,sys
 p=pathlib.Path('/etc/freeradius/3.0/clients.conf')
 s=p.read_text()
-block='client localhost {\n\tipaddr = 127.0.0.1\n\tsecret = '+sys.argv[1]+'\n\t proto = *\n}\n'
+# require_message_authenticator=no: ocserv/radcli on Ubuntu 24.04 may omit
+# Message-Authenticator; FreeRADIUS 3.2 otherwise silently drops those packets.
+block='client localhost {\n\tipaddr = 127.0.0.1\n\tsecret = '+sys.argv[1]+'\n\tproto = *\n\trequire_message_authenticator = no\n\tlimit_proxy_state = no\n}\n'
 if re.search(r'(?ms)^client localhost\s*\{.*?^\}',s): s=re.sub(r'(?ms)^client localhost\s*\{.*?^\}',block.rstrip(),s,count=1)
 else: s += '\n'+block
 p.write_text(s)
@@ -240,7 +243,10 @@ if unique.exists():
 PY
 freeradius -XC >/dev/null
 systemctl enable --now freeradius.service
-install -d -o root -g root -m 750 /etc/radcli
+# ocserv runs as nobody:nogroup and must read radcli secrets; keep the directory group-readable only.
+install -d -o root -g nogroup -m 750 /etc/radcli
+chown root:nogroup /etc/radcli
+chmod 750 /etc/radcli
 cat > /etc/radcli/radiusclient.conf <<'EOF'
 authserver 127.0.0.1:1812
 acctserver 127.0.0.1:1813
@@ -251,7 +257,8 @@ radius_retries 2
 bindaddr 127.0.0.1
 EOF
 printf '127.0.0.1 %s\n' "$RADIUS_SECRET" > /etc/radcli/servers
-chmod 600 /etc/radcli/servers
+chown root:nogroup /etc/radcli/radiusclient.conf /etc/radcli/servers
+chmod 640 /etc/radcli/radiusclient.conf /etc/radcli/servers
 
 echo '[6/11] Preparing WireGuard…'
 install -d -o root -g root -m 700 /etc/wireguard
@@ -261,7 +268,13 @@ else
   umask 077; wg genkey > /etc/wireguard/server_private
 fi
 wg pubkey < /etc/wireguard/server_private > /etc/wireguard/server_public
-chmod 600 /etc/wireguard/server_private /etc/wireguard/server_public
+# Panel user must read the public key to build client configs; private key stays root-only.
+chown root:root /etc/wireguard/server_private
+chown root:ikev2-panel /etc/wireguard/server_public
+chmod 600 /etc/wireguard/server_private
+chmod 640 /etc/wireguard/server_public
+chown root:ikev2-panel /etc/wireguard
+chmod 750 /etc/wireguard
 WG_PRIVATE="$(cat /etc/wireguard/server_private)"
 WG6_ADDRESS=''
 WG6_UP=''
@@ -460,6 +473,14 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$remote_addr;
         proxy_set_header X-Forwarded-Proto https;
+    }
+    location = /index.html {
+        add_header Cache-Control "no-store";
+        try_files \$uri =404;
+    }
+    location = /portal {
+        add_header Cache-Control "no-store";
+        try_files /index.html =404;
     }
     location / { try_files \$uri \$uri/ /index.html; }
     location ~ /\. { deny all; }

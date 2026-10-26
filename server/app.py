@@ -134,6 +134,9 @@ def initialize_db():
     for name, definition in migrations.items():
         if name not in existing:
             con.execute(f'ALTER TABLE vpn_users ADD COLUMN {name} {definition}')
+    peer_cols = {r[1] for r in con.execute('PRAGMA table_info(wireguard_peers)').fetchall()}
+    if 'private_key' not in peer_cols:
+        con.execute('ALTER TABLE wireguard_peers ADD COLUMN private_key TEXT')
     con.execute('CREATE INDEX IF NOT EXISTS renewal_status_idx ON renewal_requests(status,created_at)')
     con.execute('CREATE INDEX IF NOT EXISTS orders_status_idx ON sales_orders(status,created_at)')
     con.execute('CREATE INDEX IF NOT EXISTS wg_user_idx ON wireguard_peers(vpn_user_id,revoked)')
@@ -375,6 +378,9 @@ def portal_login():
 def portal_me():
     user = g.portal_user
     with connect() as con:
+        peer = con.execute('''SELECT assigned_ip FROM wireguard_peers
+            WHERE vpn_user_id=? AND revoked=0 AND private_key IS NOT NULL AND private_key!=''
+            ORDER BY id LIMIT 1''', (user['id'],)).fetchone()
         peer_count = con.execute('SELECT count(*) FROM wireguard_peers WHERE vpn_user_id=? AND revoked=0', (user['id'],)).fetchone()[0]
         requests = con.execute('''SELECT r.id,r.status,r.created_at,p.name AS plan_name
             FROM renewal_requests r LEFT JOIN plans p ON p.id=r.plan_id
@@ -386,7 +392,9 @@ def portal_me():
         quotaBytes=user['quota_bytes'], usedBytes=total_used,
         uploadBytes=user['used_up_bytes'], downloadBytes=user['used_down_bytes'],
         expiresAt=user['expires_at'], maxConnections=user['max_connections'],protocols=user['protocols'].split(','),
-        wireguardDevices=peer_count, mustChangePassword=not bool(user['portal_password_changed']),
+        wireguardDevices=peer_count, wireguardReady=bool(peer),
+        wireguardAddress=peer['assigned_ip'] if peer else None,
+        mustChangePassword=not bool(user['portal_password_changed']),
         renewals=[{'id':r['id'],'status':r['status'],'createdAt':r['created_at'],'plan':r['plan_name']} for r in requests],
         plans=[{'id':p['id'],'name':p['name'],'days':p['days'],'quotaBytes':p['quota_bytes'],'price':p['price'],'protocol':p['protocol']} for p in plans])
 
@@ -520,9 +528,13 @@ def active_connections():
                 remote_ip = remote_text[1:].split(']', 1)[0]
             else:
                 remote_ip = remote_text.split('[', 1)[0].strip()
+            # Windows often puts a machine name/LAN IP in the IKE identity and the
+            # real VPN username only in EAP: 'user'. Prefer EAP when present.
+            eap = re.search(r"EAP:\s*'([^']+)'", chunk)
+            username = eap.group(1) if eap else identity.group(1)
             bracket_values = re.findall(r'\[([^\]]+)\]', remote_text)
             virtual_ips = [value for value in bracket_values if value != remote_ip and ('.' in value or ':' in value)]
-            active.append({'id': int(line.group(2)), 'state': line.group(3), 'username': identity.group(1),
+            active.append({'id': int(line.group(2)), 'state': line.group(3), 'username': username,
                            'remote': remote_ip, 'virtualAddresses': ' '.join(virtual_ips),'protocol':'IKEv2'})
     return active
 
@@ -625,22 +637,29 @@ def create_user():
         return jsonify(error='نام کاربری باید ۳ تا ۳۲ نویسه و شامل حروف انگلیسی، عدد، نقطه، خط تیره یا زیرخط باشد.'), 400
     if not isinstance(password, str) or not VPN_PASS_RE.fullmatch(password):
         return jsonify(error='رمز VPN باید ۴ تا ۱۲۸ نویسه و فقط شامل حروف انگلیسی، عدد و . _ ! @ # % + = : - باشد.'), 400
+    protocol_set = sorted(set(protocols))
+    wireguard_config = None
     try:
         with connect() as con:
-            con.execute('''INSERT INTO vpn_users(username,vpn_password,enabled,note,created_at,
+            cur = con.execute('''INSERT INTO vpn_users(username,vpn_password,enabled,note,created_at,
                 quota_bytes,expires_at,max_connections,protocols,portal_password_hash)
                 VALUES(?,?,1,?,?,?,?,?,?,?)''',
-                (username,password,note,now(),quota_bytes,expires_at,maximum,','.join(sorted(set(protocols))),hash_password(password)))
+                (username,password,note,now(),quota_bytes,expires_at,maximum,','.join(protocol_set),hash_password(password)))
+            user_id = cur.lastrowid
         sync_enabled_users()
-        sync_wireguard_peers()
+        if 'wireguard' in protocol_set:
+            wireguard_config = ensure_wireguard_peer(user_id)
+        else:
+            sync_wireguard_peers()
     except sqlite3.IntegrityError:
         return jsonify(error='این نام کاربری قبلاً ثبت شده است.'), 409
     except Exception as error:
         with connect() as con: con.execute('DELETE FROM vpn_users WHERE username=?', (username,))
         return jsonify(error=str(error)), 500
     audit(g.admin['username'],'user_created',username)
-    return jsonify(ok=True, username=username, password=password, protocols=sorted(set(protocols)), portalUsername=username,
-        portalPassword=password, portalUrl=request.host_url.rstrip('/')+'/portal'), 201
+    return jsonify(ok=True, username=username, password=password, protocols=protocol_set, portalUsername=username,
+        portalPassword=password, portalUrl=request.host_url.rstrip('/')+'/portal',
+        wireguardConfig=wireguard_config), 201
 
 @APP.patch('/api/users/<int:user_id>')
 @require_auth
@@ -678,7 +697,18 @@ def update_user(user_id):
         enabled=bool(data.get('enabled',row['enabled']))
     try:
         sync_enabled_users()
-        sync_wireguard_peers()
+        if 'protocols' in data:
+            new_protocols = set(data['protocols'])
+            old_protocols = set(row['protocols'].split(','))
+            if 'wireguard' in new_protocols and 'wireguard' not in old_protocols:
+                ensure_wireguard_peer(user_id)
+            elif 'wireguard' not in new_protocols and 'wireguard' in old_protocols:
+                revoke_wireguard_peers(user_id)
+                sync_wireguard_peers()
+            else:
+                sync_wireguard_peers()
+        else:
+            sync_wireguard_peers()
         if not enabled: helper('revoke-user', {'username': row['username']})
         elif 'protocols' in data and 'ocserv' in row['protocols'].split(',') and 'ocserv' not in data['protocols']:
             helper('revoke-ocserv-user', {'username': row['username']})
@@ -945,7 +975,12 @@ def review_order(order_id):
         con.execute('''UPDATE sales_orders SET status=?,vpn_user_id=?,reviewed_at=?,reviewed_by=?,delivery_pending=1 WHERE id=?''',
             (status,user_id,now(),g.admin['username'],order_id))
     if decision=='approve':
-        try:sync_enabled_users()
+        try:
+            sync_enabled_users()
+            if 'wireguard' in protocols.split(','):
+                ensure_wireguard_peer(user_id)
+            else:
+                sync_wireguard_peers()
         except Exception as error:
             with connect() as con:con.execute('UPDATE sales_orders SET status="provisioning_failed",delivery_pending=0 WHERE id=?',(order_id,))
             return jsonify(error=str(error)),500
@@ -1006,6 +1041,71 @@ def ios_profile():
     return send_file(io.BytesIO(data),mimetype='application/x-apple-aspen-config',as_attachment=True,
                      download_name='forge-connect.mobileconfig')
 
+@APP.get('/api/portal/profile/windows')
+@require_portal_auth
+def windows_profile():
+    """One-click Windows setup: install CA into Trusted Root and create an IKEv2 VPN entry."""
+    user = g.portal_user
+    if 'ikev2' not in user_protocols(user):
+        return jsonify(error='IKEv2 is not included in your plan.'), 403
+    host = DOMAIN_FILE.read_text().strip()
+    username = user['username']
+    ca_b64 = base64.b64encode(ca_der_bytes()).decode('ascii')
+    # Double-clickable .cmd that self-elevates and runs embedded PowerShell.
+    # Username is embedded; the VPN password is entered once in Windows when connecting.
+    ps = f'''$ErrorActionPreference = 'Stop'
+$Server = '{host}'
+$VpnName = 'Forge Connect'
+$UserName = '{username}'
+$CaBase64 = '{ca_b64}'
+$tempCer = Join-Path $env:TEMP ('forge-connect-ca-' + [guid]::NewGuid().ToString() + '.cer')
+try {{
+  [IO.File]::WriteAllBytes($tempCer, [Convert]::FromBase64String($CaBase64))
+  Import-Certificate -FilePath $tempCer -CertStoreLocation Cert:\\LocalMachine\\Root | Out-Null
+  Write-Host 'CA certificate installed into Trusted Root Certification Authorities.'
+  if (Get-VpnConnection -Name $VpnName -AllUserConnection -ErrorAction SilentlyContinue) {{
+    Remove-VpnConnection -Name $VpnName -AllUserConnection -Force
+  }}
+  Add-VpnConnection -Name $VpnName -ServerAddress $Server -TunnelType Ikev2 `
+    -AuthenticationMethod Eap -EncryptionLevel Required -SplitTunneling:$false `
+    -AllUserConnection -RememberCredential -Force | Out-Null
+  try {{
+    Set-VpnConnectionIPsecConfiguration -ConnectionName $VpnName -AllUserConnection `
+      -AuthenticationTransformConstants GCMAES128 -CipherTransformConstants GCMAES128 `
+      -EncryptionMethod AES256 -IntegrityCheckMethod SHA256 -PfsGroup PFS2048 `
+      -DHGroup Group14 -Force -ErrorAction Stop
+  }} catch {{
+    Write-Host 'Using Windows default IPsec proposals (custom set skipped).'
+  }}
+  Write-Host ''
+  Write-Host ('VPN profile ready: ' + $VpnName)
+  Write-Host ('Server: ' + $Server)
+  Write-Host ('Username: ' + $UserName)
+  Write-Host 'In Windows VPN settings choose Forge Connect, enter your VPN password, then Connect.'
+  Start-Process 'ms-settings:network-vpn'
+}} finally {{
+  Remove-Item -LiteralPath $tempCer -Force -ErrorAction SilentlyContinue
+}}
+Write-Host ''
+Write-Host 'Done. You can close this window.'
+Read-Host 'Press Enter to close'
+'''
+    # Wrap as .cmd so users can double-click without changing ExecutionPolicy first.
+    encoded = base64.b64encode(ps.encode('utf-16le')).decode('ascii')
+    cmd = (
+        '@echo off\r\n'
+        'net session >nul 2>&1\r\n'
+        'if not %errorlevel%==0 (\r\n'
+        '  echo Requesting Administrator permission...\r\n'
+        '  powershell -NoProfile -Command "Start-Process -FilePath \'%~f0\' -Verb RunAs"\r\n'
+        '  exit /b\r\n'
+        ')\r\n'
+        f'powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded}\r\n'
+    )
+    data = cmd.encode('ascii', errors='strict')
+    return send_file(io.BytesIO(data), mimetype='application/x-bat', as_attachment=True,
+                     download_name='Forge-Connect-Windows.cmd')
+
 def sync_wireguard_peers():
     with connect() as con:
         rows=con.execute('''SELECT p.public_key,p.assigned_ip FROM wireguard_peers p
@@ -1015,66 +1115,123 @@ def sync_wireguard_peers():
           AND instr(','||u.protocols||',',',wireguard,')>0''',(now(),)).fetchall()
     return helper('sync-wireguard',[{'publicKey':r['public_key'],'address':r['assigned_ip']} for r in rows])
 
+def wireguard_server_public():
+    try:
+        value = Path('/etc/wireguard/server_public').read_text().strip()
+    except OSError as error:
+        raise RuntimeError('WireGuard server key is unavailable.') from error
+    if not value:
+        raise RuntimeError('WireGuard server key is unavailable.')
+    return value
+
+def build_wireguard_config(private_key, address):
+    host = DOMAIN_FILE.read_text().strip()
+    server_public = wireguard_server_public()
+    ipv6_enabled = Path('/etc/ikev2-manager/ipv6-enabled').exists() and Path('/etc/ikev2-manager/ipv6-enabled').read_text().strip() == '1'
+    slot = int(address.split('.')[-1].split('/')[0])
+    interface_address = address + (f', fd88:2026:10::{slot}/128' if ipv6_enabled else '')
+    return (
+        f'[Interface]\nPrivateKey = {private_key}\nAddress = {interface_address}\nDNS = 1.1.1.1, 1.0.0.1\n\n'
+        f'[Peer]\nPublicKey = {server_public}\nEndpoint = {host}:51820\nAllowedIPs = 0.0.0.0/0, ::/0\nPersistentKeepalive = 25\n'
+    )
+
+def revoke_wireguard_peers(user_id):
+    with connect() as con:
+        con.execute('UPDATE wireguard_peers SET revoked=1 WHERE vpn_user_id=? AND revoked=0', (user_id,))
+
+def ensure_wireguard_peer(user_id, label='default'):
+    """Create exactly one active WireGuard peer for the account and return its client config."""
+    with connect() as con:
+        existing = con.execute(
+            '''SELECT id,private_key,assigned_ip,public_key FROM wireguard_peers
+               WHERE vpn_user_id=? AND revoked=0 ORDER BY id LIMIT 1''',
+            (user_id,)).fetchone()
+        if existing and existing['private_key']:
+            return build_wireguard_config(existing['private_key'], existing['assigned_ip'])
+        if existing:
+            con.execute('UPDATE wireguard_peers SET revoked=1 WHERE id=?', (existing['id'],))
+        used = {r[0] for r in con.execute('SELECT assigned_ip FROM wireguard_peers').fetchall()}
+        slot = next((n for n in range(2, 255) if f'10.88.0.{n}/32' not in used), None)
+        if slot is None:
+            raise RuntimeError('WireGuard address pool is full.')
+        address = f'10.88.0.{slot}/32'
+    private = subprocess.run(['/usr/bin/wg', 'genkey'], text=True, capture_output=True, timeout=5)
+    if private.returncode:
+        raise RuntimeError('WireGuard key generation failed.')
+    private_key = private.stdout.strip()
+    public = subprocess.run(['/usr/bin/wg', 'pubkey'], input=private_key + '\n', text=True, capture_output=True, timeout=5)
+    if public.returncode:
+        raise RuntimeError('WireGuard key generation failed.')
+    public_key = public.stdout.strip()
+    with connect() as con:
+        cur = con.execute(
+            '''INSERT INTO wireguard_peers(vpn_user_id,label,public_key,private_key,assigned_ip,created_at)
+               VALUES(?,?,?,?,?,?)''',
+            (user_id, label, public_key, private_key, address, now()))
+        peer_id = cur.lastrowid
+    try:
+        sync_wireguard_peers()
+        return build_wireguard_config(private_key, address)
+    except Exception:
+        with connect() as con:
+            con.execute('DELETE FROM wireguard_peers WHERE id=?', (peer_id,))
+        try:
+            sync_wireguard_peers()
+        except Exception:
+            pass
+        raise
+
 @APP.get('/api/portal/wireguard/devices')
 @require_portal_auth
-def portal_wireguard_devices():
+def portal_wireguard_devices_compat():
+    # Compatibility for cached older portal builds; profiles are created with the account now.
     with connect() as con:
-        rows=con.execute('SELECT id,label,assigned_ip,created_at,revoked FROM wireguard_peers WHERE vpn_user_id=? ORDER BY id DESC',
-                         (g.portal_user['id'],)).fetchall()
-    return jsonify(devices=[{'id':r['id'],'label':r['label'],'address':r['assigned_ip'],'createdAt':r['created_at'],'revoked':bool(r['revoked'])} for r in rows])
+        rows = con.execute(
+            '''SELECT id,label,assigned_ip,created_at,revoked FROM wireguard_peers
+               WHERE vpn_user_id=? AND revoked=0 ORDER BY id''',
+            (g.portal_user['id'],)).fetchall()
+    return jsonify(devices=[{
+        'id': r['id'], 'label': r['label'], 'address': r['assigned_ip'],
+        'createdAt': r['created_at'], 'revoked': bool(r['revoked']),
+    } for r in rows])
 
 @APP.post('/api/portal/wireguard/devices')
 @require_portal_auth
-def create_wireguard_device():
-    user=g.portal_user
-    with connect() as con:
-        row=con.execute('SELECT protocols,enabled,expires_at,quota_bytes,used_up_bytes,used_down_bytes,max_connections FROM vpn_users WHERE id=?',(user['id'],)).fetchone()
-        count=con.execute('SELECT count(*) FROM wireguard_peers WHERE vpn_user_id=? AND revoked=0',(user['id'],)).fetchone()[0]
-        if not row['enabled']:return jsonify(error='Your account is disabled.'),403
-        if 'wireguard' not in row['protocols'].split(','):return jsonify(error='WireGuard is not included in your plan.'),403
-        if count>=row['max_connections']:return jsonify(error='You have reached the device limit for this account.'),409
-        if row['expires_at'] and row['expires_at']<=now():return jsonify(error='Your subscription has expired.'),403
-        if row['quota_bytes'] and row['used_up_bytes']+row['used_down_bytes']>=row['quota_bytes']:return jsonify(error='Your data allowance is used up.'),403
-        label=data_label=(request.get_json(silent=True) or {}).get('label','')
-        if not isinstance(label,str) or not 2<=len(label.strip())<=48 or re.search(r'[\x00-\x1f\[\]]',label):return jsonify(error='Device name must contain 2–48 safe characters.'),400
-        used={r[0] for r in con.execute('SELECT assigned_ip FROM wireguard_peers').fetchall()}
-        slot=next((n for n in range(2,255) if f'10.88.0.{n}/32' not in used),None)
-        if slot is None:return jsonify(error='WireGuard address pool is full.'),409
-    private=subprocess.run(['/usr/bin/wg','genkey'],text=True,capture_output=True,timeout=5)
-    if private.returncode:return jsonify(error='WireGuard key generation failed.'),500
-    private_key=private.stdout.strip()
-    public=subprocess.run(['/usr/bin/wg','pubkey'],input=private_key+'\n',text=True,capture_output=True,timeout=5)
-    if public.returncode:return jsonify(error='WireGuard key generation failed.'),500
-    public_key=public.stdout.strip(); address=f'10.88.0.{slot}/32'
-    with connect() as con:
-        cur=con.execute('INSERT INTO wireguard_peers(vpn_user_id,label,public_key,assigned_ip,created_at) VALUES(?,?,?,?,?)',
-                        (user['id'],label.strip(),public_key,address,now()))
-        peer_id=cur.lastrowid
-    try:sync_wireguard_peers()
-    except Exception as error:
-        with connect() as con:con.execute('DELETE FROM wireguard_peers WHERE id=?',(peer_id,))
-        return jsonify(error=str(error)),500
-    try:server_public=Path('/etc/wireguard/server_public').read_text().strip()
-    except OSError:return jsonify(error='WireGuard server key is unavailable.'),503
-    host=DOMAIN_FILE.read_text().strip()
-    ipv6_enabled=Path('/etc/ikev2-manager/ipv6-enabled').exists() and Path('/etc/ikev2-manager/ipv6-enabled').read_text().strip()=='1'
-    slot=int(address.split('.')[-1].split('/')[0])
-    interface_address=address+(f', fd88:2026:10::{slot}/128' if ipv6_enabled else '')
-    # Route IPv6 into the tunnel even on IPv4-only VPSs, where it is intentionally dropped.
-    routes='0.0.0.0/0, ::/0'
-    config=f'[Interface]\nPrivateKey = {private_key}\nAddress = {interface_address}\nDNS = 1.1.1.1, 1.0.0.1\n\n[Peer]\nPublicKey = {server_public}\nEndpoint = {host}:51820\nAllowedIPs = {routes}\nPersistentKeepalive = 25\n'
-    audit(user['username'],'wireguard_device_created',label.strip())
-    return jsonify(ok=True,id=peer_id,label=label.strip(),config=config,publicKey=public_key),201
+def portal_wireguard_devices_create_disabled():
+    return jsonify(error='WireGuard profiles are created automatically with the account. Download the ready profile from the portal.'), 403
 
-@APP.delete('/api/portal/wireguard/devices/<int:peer_id>')
+@APP.get('/api/portal/wireguard/config')
 @require_portal_auth
-def delete_wireguard_device(peer_id):
+def portal_wireguard_config():
+    user = g.portal_user
     with connect() as con:
-        row=con.execute('SELECT public_key,label FROM wireguard_peers WHERE id=? AND vpn_user_id=? AND revoked=0',
-                        (peer_id,g.portal_user['id'])).fetchone()
-        if not row:return jsonify(error='Device not found.'),404
-        con.execute('UPDATE wireguard_peers SET revoked=1 WHERE id=?',(peer_id,))
-    try:sync_wireguard_peers()
-    except Exception as error:return jsonify(error=str(error)),500
-    audit(g.portal_user['username'],'wireguard_device_revoked',row['label'])
-    return jsonify(ok=True)
+        row = con.execute('SELECT protocols,enabled FROM vpn_users WHERE id=?', (user['id'],)).fetchone()
+    if not row or not row['enabled']:
+        return jsonify(error='Your account is disabled.'), 403
+    if 'wireguard' not in row['protocols'].split(','):
+        return jsonify(error='WireGuard is not included in your plan.'), 403
+    with connect() as con:
+        peer = con.execute(
+            '''SELECT private_key,assigned_ip FROM wireguard_peers
+               WHERE vpn_user_id=? AND revoked=0 AND private_key IS NOT NULL AND private_key!=''
+               ORDER BY id LIMIT 1''',
+            (user['id'],)).fetchone()
+    if not peer:
+        return jsonify(error='WireGuard profile is not ready yet. Ask the administrator to recreate it.'), 404
+    config = build_wireguard_config(peer['private_key'], peer['assigned_ip'])
+    return jsonify(ok=True, config=config, filename=f'forge-connect-{user["username"]}.conf')
+
+@APP.get('/api/users/<int:user_id>/wireguard')
+@require_auth
+def admin_wireguard_config(user_id):
+    with connect() as con:
+        user = con.execute('SELECT username,protocols FROM vpn_users WHERE id=?', (user_id,)).fetchone()
+    if not user:
+        return jsonify(error='کاربر پیدا نشد.'), 404
+    if 'wireguard' not in user['protocols'].split(','):
+        return jsonify(error='WireGuard برای این حساب فعال نیست.'), 404
+    try:
+        config = ensure_wireguard_peer(user_id)
+    except Exception as error:
+        return jsonify(error=str(error)), 500
+    return jsonify(ok=True, config=config, filename=f'forge-connect-{user["username"]}.conf')

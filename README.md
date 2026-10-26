@@ -45,6 +45,12 @@
 sudo bash ./install.sh
 ```
 
+برای پاک‌سازی کامل نصب قبلی (قبل از نصب مجدد روی همان VPS):
+
+```bash
+sudo bash ./uninstall.sh
+```
+
 نصب‌کننده دامنه و ایمیل اختیاری گواهی را می‌پرسد، DNS را بررسی می‌کند و strongSwan، فایروال، Nginx، HTTPS و پنل را آماده می‌کند. در پایان یک کد یک‌بارمصرف نمایش داده می‌شود. نشانی HTTPS چاپ‌شده را باز کنید، کد را وارد کنید و نام کاربری و رمز مدیر را بسازید. کد پس از ثبت موفق مدیر مصرف می‌شود.
 
 می‌توانید دامنه و ایمیل را هم از متغیر محیطی بدهید:
@@ -65,7 +71,7 @@ sudo VPN_DOMAIN=vpn.example.com ACME_EMAIL=admin@example.com bash ./install.sh
 
 OpenConnect روی `8443/TCP+UDP` و با مسیر پیش‌فرض full-tunnel تنظیم می‌شود. نصب‌کننده برای poolهای VPN قواعد forwarding و NAT را به‌صورت پایدار می‌سازد و DNS تونل را تنظیم می‌کند؛ اگر VPS مسیر عمومی IPv6 داشته باشد، pool و forwarding/NAT IPv6 نیز فعال می‌شود. بدون IPv6 عمومی روی VPS، تونل فقط IPv4 را پوشش می‌دهد. پورت‌های لازم را در فایروال ارائه‌دهنده هم باز کنید.
 
-در پنل کاربر راهنمای تصویری و پروفایل‌های قابل دریافت قرار دارد. Android فایل `.sswan` را در strongSwan VPN Client وارد می‌کند؛ iPhone فایل `.mobileconfig` را نصب می‌کند؛ در Windows، اتصال IKEv2 از VPN Settings ساخته و CA روی دستگاه مورداعتماد می‌شود. تصاویر راهنما از مستندات و راهنماهای پلتفرم‌ها هستند و پیوند منبع کنار هر تصویر درج شده است. WireGuard از پنل کاربر برای هر دستگاه یک فایل پیکربندی مستقل می‌سازد؛ آن فایل حاوی کلید خصوصی است و باید مانند رمز محرمانه نگهداری شود.
+در پنل کاربر راهنمای تصویری و پروفایل‌های قابل دریافت قرار دارد. Android فایل `.sswan` را در strongSwan VPN Client وارد می‌کند؛ iPhone فایل `.mobileconfig` را نصب می‌کند؛ Windows فایل `Forge-Connect-Windows.cmd` را با یک دابل‌کلیک (با اجازه Administrator) گواهی CA را در Trusted Root نصب و پروفایل IKEv2 را می‌سازد — بعد فقط رمز VPN را در تنظیمات ویندوز وارد کنید. تصاویر راهنما از مستندات و راهنماهای پلتفرم‌ها هستند و پیوند منبع کنار هر تصویر درج شده است. WireGuard از پنل کاربر برای هر دستگاه یک فایل پیکربندی مستقل می‌سازد؛ آن فایل حاوی کلید خصوصی است و باید مانند رمز محرمانه نگهداری شود.
 
 حداقل طول رمز کاربران VPN چهار نویسه و حداقل طول رمز مدیر چهارده نویسه است. برای احراز هویت IKEv2، رمز VPN در پایگاه دادهٔ محدودشده و فهرست محلی FreeRADIUS به‌شکل قابل‌بازیابی نگهداری می‌شود؛ رمز مدیر با scrypt و salt هش می‌شود. پورت‌های TCP/UDP شمارهٔ 8443 را برای OpenConnect و UDP شمارهٔ 51820 را برای WireGuard علاوه بر فایروال سیستم در پنل شبکهٔ ارائه‌دهندهٔ VPS نیز باز کنید.
 
@@ -154,6 +160,12 @@ Copy and extract the release archive on the VPS, then run this from the project 
 sudo bash ./install.sh
 ```
 
+To wipe a previous install on the same VPS before reinstalling:
+
+```bash
+sudo bash ./uninstall.sh
+```
+
 The installer asks for the domain and an optional certificate email, checks DNS, and configures strongSwan, the firewall, Nginx, HTTPS, and the panel. It prints a one-time setup code at the end. Open the HTTPS URL, enter the code, and create the administrator username and password. The code is consumed after successful setup.
 
 You can provide the domain and email through environment variables:
@@ -174,7 +186,7 @@ OpenConnect uses `8443/TCP+UDP` with a default full-tunnel route. The installer 
 
 ### Client setup
 
-The user portal includes illustrated setup guides and downloadable profiles. Android imports the `.sswan` file into strongSwan VPN Client; iPhone installs the `.mobileconfig` profile; Windows uses the built-in IKEv2 VPN settings and trusts the CA certificate. Screenshot sources and platform instructions are linked beside each image. WireGuard creates a separate config file per device in the portal; it contains the private key and must be kept secret.
+The user portal includes illustrated setup guides and downloadable profiles. Android imports the `.sswan` file into strongSwan VPN Client; iPhone installs the `.mobileconfig` profile; Windows downloads `Forge-Connect-Windows.cmd`, which installs the CA into Trusted Root and creates the IKEv2 profile in one elevated double-click — then enter the VPN password in Windows VPN settings. Screenshot sources and platform instructions are linked beside each image. WireGuard creates a separate config file per device in the portal; it contains the private key and must be kept secret.
 
 VPN passwords must be at least 4 characters; administrator passwords must be at least 14 characters. IKEv2 authentication requires recoverable VPN passwords, so they are stored in the restricted database and local FreeRADIUS users file. Administrator passwords are salted scrypt hashes. Also allow TCP and UDP 8443 in the VPS provider firewall for OpenConnect, and UDP 51820 for WireGuard.
 
