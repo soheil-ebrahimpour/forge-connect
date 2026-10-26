@@ -48,8 +48,7 @@ def sync_users():
         seen.add(username)
         for protocol, nas in (('ikev2','forge-ikev2'),('ocserv','forge-ocserv')):
             if protocol in protocols:
-                radius_lines.extend([f'{username} Cleartext-Password := "{password}", NAS-Identifier == "{nas}"',
-                                     f'\tSimultaneous-Use := {maximum},',
+                radius_lines.extend([f'{username} Cleartext-Password := "{password}", NAS-Identifier == "{nas}", Simultaneous-Use := {maximum}',
                                      '\tFall-Through = Yes', ''])
     lines.append('}')
     content = '\n'.join(lines) + '\n'
