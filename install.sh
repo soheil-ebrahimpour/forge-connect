@@ -344,7 +344,7 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 PrivateTmp=true
 ReadWritePaths=/var/lib/ikev2-manager /etc/swanctl/conf.d /etc/freeradius/3.0/mods-config/files /etc/wireguard
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -369,7 +369,7 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 ReadWritePaths=/var/lib/ikev2-manager
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -546,7 +546,7 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 ReadWritePaths=/var/lib/ikev2-manager /etc/swanctl/conf.d /etc/ikev2-manager /etc/freeradius/3.0/mods-config/files /etc/wireguard
 ReadOnlyPaths=/etc/swanctl/x509ca
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 [Install]
 WantedBy=multi-user.target
 EOF
