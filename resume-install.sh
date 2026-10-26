@@ -15,6 +15,11 @@ IPV6="$(cat "$IPV6_FILE")"
 [[ "$DOMAIN" =~ ^([A-Za-z0-9][A-Za-z0-9-]*\.)+[A-Za-z]{2,63}$ && "$IFACE" =~ ^[A-Za-z0-9_.:-]+$ && "$IPV6" =~ ^[01]$ ]] || { echo 'Invalid saved install settings.' >&2; exit 1; }
 [[ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" && -f "/etc/letsencrypt/live/$DOMAIN/privkey.pem" ]] || { echo 'The HTTPS certificate is missing; resume cannot continue.' >&2; exit 1; }
 [[ -x /usr/local/sbin/ikev2-panel-helper && -f /opt/ikev2-manager/app.py && -f /opt/ikev2-manager/accounting_worker.py && -f /opt/ikev2-manager/telegram_worker.py ]] || { echo 'The panel files are missing; resume cannot continue.' >&2; exit 1; }
+if [[ ! -s /etc/radcli/dictionary ]]; then
+  apt-get -o Dpkg::Options::=--force-confmiss install --reinstall -y -qq libradcli4
+fi
+[[ -s /etc/radcli/dictionary ]] || { echo 'radcli dictionary is missing.' >&2; exit 1; }
+sed -i 's#^dictionary .*#dictionary /etc/radcli/dictionary#' /etc/radcli/radiusclient.conf
 OCSERV_V6=''
 if [[ "$IPV6" == 1 ]]; then OCSERV_V6='ipv6-network = fd99:2026:10::/64'; fi
 cat > /etc/ocserv/ocserv.conf <<EOF

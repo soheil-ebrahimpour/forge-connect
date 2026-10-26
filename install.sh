@@ -69,8 +69,11 @@ echo '[1/10] Installing system packages…'
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq strongswan-swanctl charon-systemd strongswan-pki libcharon-extra-plugins libcharon-extauth-plugins \
-  freeradius freeradius-utils wireguard-tools ocserv nginx certbot python3-certbot-nginx python3-flask gunicorn ufw iptables curl openssl sudo
+  freeradius freeradius-utils wireguard-tools ocserv libradcli4 nginx certbot python3-certbot-nginx python3-flask gunicorn ufw iptables curl openssl sudo
 systemctl disable --now ocserv.service 2>/dev/null || true
+if [[ ! -s /etc/radcli/dictionary ]]; then
+  apt-get -o Dpkg::Options::=--force-confmiss install --reinstall -y -qq libradcli4
+fi
 
 echo '[2/10] Preparing secure directories…'
 getent group ikev2-panel >/dev/null || groupadd --system ikev2-panel
@@ -242,7 +245,7 @@ cat > /etc/radcli/radiusclient.conf <<'EOF'
 authserver 127.0.0.1:1812
 acctserver 127.0.0.1:1813
 servers /etc/radcli/servers
-dictionary /usr/share/freeradius/dictionary
+dictionary /etc/radcli/dictionary
 radius_timeout 5
 radius_retries 2
 bindaddr 127.0.0.1
