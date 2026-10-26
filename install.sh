@@ -491,6 +491,7 @@ server-key = /etc/letsencrypt/live/$DOMAIN/privkey.pem
 run-as-user = nobody
 run-as-group = nogroup
 use-occtl = true
+socket-file = /run/ocserv-socket
 device = vpns
 max-clients = 512
 max-same-clients = 50
