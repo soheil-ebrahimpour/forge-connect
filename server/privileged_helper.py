@@ -49,8 +49,8 @@ def sync_users():
         for protocol, nas in (('ikev2','forge-ikev2'),('ocserv','forge-ocserv')):
             if protocol in protocols:
                 radius_lines.extend([f'{username} Cleartext-Password := "{password}", NAS-Identifier == "{nas}"',
-                                     f'    Simultaneous-Use := {maximum}',
-                                     '    Fall-Through = Yes', ''])
+                                     f'\tSimultaneous-Use := {maximum},',
+                                     '\tFall-Through = Yes', ''])
     lines.append('}')
     content = '\n'.join(lines) + '\n'
     USERS_FILE.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
@@ -90,7 +90,7 @@ def sync_users():
             if old is not None:
                 USERS_FILE.write_bytes(old); USERS_FILE.chmod(0o600)
             if radius_old is not None:
-                RADIUS_USERS_FILE.write_bytes(radius_old); RADIUS_USERS_FILE.chown(0,grp.getgrnam('freerad').gr_gid); RADIUS_USERS_FILE.chmod(0o640)
+                RADIUS_USERS_FILE.write_bytes(radius_old); os.chown(RADIUS_USERS_FILE,0,grp.getgrnam('freerad').gr_gid); RADIUS_USERS_FILE.chmod(0o640)
             run([SWANCTL, '--load-creds', '--clear'])
             run(['/usr/bin/systemctl','reload','freeradius.service'])
             raise RuntimeError(reload_radius.stderr[-800:] or 'could not reload FreeRADIUS')
