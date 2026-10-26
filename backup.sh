@@ -19,8 +19,9 @@ target.close(); source.close()
 PY
 install -m 600 /etc/swanctl/private/ikev2-ca-key.pem "$TMP/data/ca-private-key.pem"
 install -m 600 /etc/swanctl/x509ca/ikev2-root-ca.pem "$TMP/data/ca-root.pem"
+[[ ! -f /etc/wireguard/server_private ]] || install -m 600 /etc/wireguard/server_private "$TMP/data/wg-server-private.key"
 install -m 644 /etc/ikev2-manager/domain "$TMP/data/domain.txt"
-tar -czf "$TMP/data.tar.gz" -C "$TMP/data" panel.sqlite3 ca-private-key.pem ca-root.pem domain.txt
+tar -czf "$TMP/data.tar.gz" -C "$TMP/data" panel.sqlite3 ca-private-key.pem ca-root.pem domain.txt $( [[ -f "$TMP/data/wg-server-private.key" ]] && echo wg-server-private.key )
 printf '%s' "$PASSWORD" > "$TMP/pass"; chmod 600 "$TMP/pass"
 openssl enc -aes-256-cbc -salt -pbkdf2 -iter 600000 -in "$TMP/data.tar.gz" -out "$OUT" -pass "file:$TMP/pass"
 chmod 600 "$OUT"

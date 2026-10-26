@@ -8,16 +8,22 @@
 
 ### امکانات
 
-- نصب strongSwan و VPN مبتنی بر IKEv2 با ورود EAP-MSCHAPv2
+- نصب strongSwan و IKEv2 با احراز هویت EAP از طریق FreeRADIUS
+- WireGuard با ساخت پروفایل جداگانه برای هر دستگاه
 - ساخت گواهی سرور و CA ریشه برای اعتماد دستگاه‌های کاربران
 - NAT برای IPv4 و فعال‌سازی IPv6 در صورت وجود مسیر عمومی IPv6 روی VPS
 - تنظیم UFW با حفظ پورت SSH و باز کردن پورت‌های VPN و وب
 - راه‌اندازی Nginx، گواهی HTTPS و تمدید خودکار آن با Certbot
 - پنل React دوزبانهٔ فارسی (RTL) و انگلیسی (LTR)، با فونت‌های محلی Vazirmatn و Inter
+- پورتال جداگانهٔ کاربر برای مشاهدهٔ مصرف واقعی، اعتبار، تغییر رمز، درخواست تمدید و دریافت پروفایل‌ها
+- تنظیم حجم مجاز، مدت اعتبار، پروتکل‌ها و سقف اتصال IKEv2 برای هر حساب
+- ثبت ترافیک IKEv2 و WireGuard و غیرفعال‌کردن خودکار حساب پس از انقضا یا پایان سهمیه
 - ساخت، غیرفعال‌کردن، فعال‌سازی مجدد، تغییر رمز و حذف کاربران VPN
+- طرح‌های تمدید، بررسی دستی رسیدها و ربات فروش تلگرام با تحویل خودکار حساب تأییدشده
+- راهنمای تصویری فارسی/انگلیسی برای Windows، Android و iOS در پورتال کاربر
 - مشاهده و قطع نشست‌های فعال، مشاهدهٔ رویدادهای مدیریتی و دانلود گواهی CA
 - انتخاب نام و رمز مدیر هنگام راه‌اندازی اولیه و تغییر آن از پنل
-- پایگاه دادهٔ SQLite و بکاپ رمزگذاری‌شده برای انتقال حساب‌ها و هویت CA به VPS دیگر
+- پایگاه دادهٔ SQLite و بکاپ رمزگذاری‌شده برای انتقال حساب‌ها، CA و کلید WireGuard سرور به VPS دیگر
 
 برنامهٔ وب فقط روی `127.0.0.1:15151` گوش می‌دهد و Nginx درگاه عمومی HTTPS است. برنامه با کاربر سیستمی محدود اجرا می‌شود و برای عملیات محدود strongSwan از یک helper کوچک با دسترسی کنترل‌شده استفاده می‌کند.
 
@@ -25,7 +31,7 @@
 
 - VPS تازه با Ubuntu Server 24.04 LTS و دسترسی root
 - رکورد DNS نوع A که به IPv4 عمومی VPS اشاره کند
-- دسترسی ورودی TCP پورت‌های 80 و 443 و UDP پورت‌های 500 و 4500
+- دسترسی ورودی TCP پورت‌های 80 و 443 و UDP پورت‌های 500، 4500 و 51820
 - اگر ارائه‌دهنده فایروال یا Security Group جداگانه دارد، همین پورت‌ها باید آنجا هم باز شوند
 
 نصب‌کننده عمداً روی نصب موجود strongSwan یا سایت Nginx دیگری اجرا نمی‌شود تا پیکربندی قبلی را بازنویسی نکند. نصب بسته‌های سیستم، گواهی اولیه و سرویس‌ها در اولین راه‌اندازی با اسکریپت انجام می‌شود؛ مدیریت حساب‌های روزمره از پنل است.
@@ -48,15 +54,17 @@ sudo VPN_DOMAIN=vpn.example.com ACME_EMAIL=admin@example.com bash ./install.sh
 
 ### کارهای پنل وب
 
-بعد از نصب اولیه، از پنل برای مدیریت کاربران VPN، فعال/غیرفعال‌کردن حساب‌ها، بازنشانی رمز، قطع نشست، تغییر مشخصات مدیر، مشاهدهٔ وضعیت و گزارش فعالیت و دانلود گواهی CA استفاده کنید. رمز جدید VPN فقط هنگام ساخت یا بازنشانی نمایش داده می‌شود؛ آن را همان موقع ذخیره کنید.
+بعد از نصب اولیه، مدیر از پنل برای ساخت کاربران و تنظیم سهمیه، اعتبار، پروتکل و سقف IKEv2 استفاده می‌کند. تنظیم فروش تلگرام، کارت پرداخت، طرح‌ها، رسیدها و درخواست‌های تمدید نیز در بخش تنظیمات است. برای هر کاربر نشانی `/portal` و مشخصات اولیه را بفرستید؛ کاربر در آنجا مصرف و اعتبارش را می‌بیند، رمز را تغییر می‌دهد، تمدید می‌خواهد و پروفایل دستگاه می‌گیرد. رمز جدید فقط هنگام ساخت یا بازنشانی نمایش داده می‌شود.
+
+سقف IKEv2 با Simultaneous-Use در FreeRADIUS اعمال می‌شود. سقف WireGuard در تعداد پروفایل‌های دستگاه حساب اعمال می‌شود؛ WireGuard به‌تنهایی هویت کاربر/دستگاه را در سطح نشست‌هایی مثل RADIUS ارائه نمی‌کند، بنابراین سقف دو پروتکل در این نسخه یک شمارندهٔ مشترک واحد نیست.
 
 برای افزودن دامنهٔ جدید یا انتقال سرویس به VPS تازه، همچنان باید DNS و دسترسی شبکهٔ ارائه‌دهنده را تنظیم کنید. جابه‌جایی سرور از مسیر بکاپ/بازیابی توضیح داده شده است. پنل فعلی ویرایش آزاد تنظیمات سیستم‌عامل یا فایروال ارائه‌دهنده را انجام نمی‌دهد.
 
 ### اتصال دستگاه‌ها
 
-برای هر کاربر، دامنهٔ VPN، نام کاربری و رمز ساخته‌شده را ارسال کنید. گواهی `ikev2-root-ca.pem` را از پنل دانلود و روی دستگاه به‌عنوان CA مورداعتماد نصب کنید. پروتکل IKEv2 با EAP-MSCHAPv2 برای Windows، Android با strongSwan VPN Client، iOS و macOS قابل استفاده است.
+در پنل کاربر راهنمای تصویری و پروفایل‌های قابل دریافت قرار دارد. Android فایل `.sswan` را در strongSwan VPN Client وارد می‌کند؛ iPhone فایل `.mobileconfig` را نصب می‌کند؛ در Windows، اتصال IKEv2 از VPN Settings ساخته و CA روی دستگاه مورداعتماد می‌شود. تصاویر راهنما از مستندات و راهنماهای پلتفرم‌ها هستند و پیوند منبع کنار هر تصویر درج شده است. WireGuard از پنل کاربر برای هر دستگاه یک فایل پیکربندی مستقل می‌سازد؛ آن فایل حاوی کلید خصوصی است و باید مانند رمز محرمانه نگهداری شود.
 
-حداقل طول رمز کاربران VPN دوازده نویسه و حداقل طول رمز مدیر چهارده نویسه است. به‌دلیل نیاز EAP-MSCHAPv2، رمز VPN در پایگاه دادهٔ محدودشده و فایل اعتبارنامهٔ strongSwan به‌شکل قابل‌بازیابی نگهداری می‌شود؛ رمز مدیر با scrypt و salt هش می‌شود.
+حداقل طول رمز کاربران VPN دوازده نویسه و حداقل طول رمز مدیر چهارده نویسه است. برای احراز هویت IKEv2، رمز VPN در پایگاه دادهٔ محدودشده و فهرست محلی FreeRADIUS به‌شکل قابل‌بازیابی نگهداری می‌شود؛ رمز مدیر با scrypt و salt هش می‌شود. UDP پورت 51820 را علاوه بر فایروال سیستم در پنل شبکهٔ ارائه‌دهندهٔ VPS نیز باز کنید.
 
 ### بکاپ و انتقال به VPS دیگر
 
@@ -106,16 +114,22 @@ Forge Connect is a bilingual web panel for deploying and managing a self-hosted 
 
 ### Features
 
-- strongSwan IKEv2 with EAP-MSCHAPv2 authentication
+- strongSwan IKEv2 with EAP authentication through FreeRADIUS
+- WireGuard with a separate client profile for each device
 - Server certificate and root CA generation
 - IPv4 NAT and optional IPv6 when the VPS has a working public IPv6 route
 - UFW rules that preserve the SSH port and open VPN/web ports
 - Nginx, HTTPS certificates, and automatic renewal with Certbot
 - Persian RTL and English LTR React panel with bundled Vazirmatn and Inter fonts
+- User portal for usage, expiry, password changes, renewal requests, and client profiles
+- Per-user quota, validity, allowed protocols, and IKEv2 simultaneous-use limits
+- IKEv2 and WireGuard traffic accounting with automatic expiry/quota suspension
+- Telegram sales bot with plans, manual receipt review, and automatic delivery after approval
+- Bilingual illustrated Windows, Android, and iOS connection guides in the user portal
 - Create, disable, re-enable, reset passwords, and delete VPN users
 - View and revoke active sessions, review admin events, and download the CA certificate
 - One-time first-admin setup and administrator credential changes in the panel
-- SQLite database and encrypted backup for moving accounts and CA identity to another VPS
+- SQLite database and encrypted backup for moving accounts, CA identity, and WireGuard server key to another VPS
 
 The web app listens only on `127.0.0.1:15151`; Nginx provides the public HTTPS entry point. The app runs as a restricted system user and uses a narrowly scoped helper for required strongSwan operations.
 
@@ -123,7 +137,7 @@ The web app listens only on `127.0.0.1:15151`; Nginx provides the public HTTPS e
 
 - A fresh Ubuntu Server 24.04 LTS VPS with root access
 - A DNS A record pointing to the VPS public IPv4 address
-- Inbound TCP ports 80 and 443, and UDP ports 500 and 4500
+- Inbound TCP ports 80 and 443, and UDP ports 500, 4500, and 51820
 - If your provider has a separate firewall or security group, allow the same ports there
 
 The installer refuses to overwrite an existing strongSwan setup or another Nginx site. The initial system packages, certificates, and services are configured by the installer; routine account management is done in the web panel.
@@ -146,15 +160,17 @@ sudo VPN_DOMAIN=vpn.example.com ACME_EMAIL=admin@example.com bash ./install.sh
 
 ### Web panel operations
 
-Use the panel to create and manage VPN accounts, enable or disable users, reset passwords, revoke sessions, change administrator credentials, review service status and activity, and download the CA certificate. A new VPN password is shown only once when created or reset; save it at that time.
+Use the panel to create accounts and set per-user quota, validity, protocols, and IKEv2 connection limits. Configure Telegram sales, plans, payment details, receipt review, and renewal requests from Settings. Give each user the `/portal` address and their initial credentials. Users can view usage and expiry, change their password, request renewal, and download device profiles. A new VPN password is shown only once when created or reset.
+
+IKEv2 limits use FreeRADIUS Simultaneous-Use. WireGuard limits the number of active device profiles for each account; WireGuard does not expose the same RADIUS-style per-login session model, so the two protocol limits are not one shared cross-protocol counter in this release.
 
 Adding a new domain or moving the service to another VPS still requires updating DNS and the provider's network access. Server migration is covered by the backup/restore workflow. The current panel does not provide unrestricted operating-system or provider-firewall editing.
 
 ### Client setup
 
-Give each user the VPN domain, username, and generated password. Download `ikev2-root-ca.pem` from the panel and install it on the device as a trusted CA certificate. IKEv2 with EAP-MSCHAPv2 can be used by Windows, Android with the strongSwan VPN Client, iOS, and macOS.
+The user portal includes illustrated setup guides and downloadable profiles. Android imports the `.sswan` file into strongSwan VPN Client; iPhone installs the `.mobileconfig` profile; Windows uses the built-in IKEv2 VPN settings and trusts the CA certificate. Screenshot sources and platform instructions are linked beside each image. WireGuard creates a separate config file per device in the portal; it contains the private key and must be kept secret.
 
-VPN passwords must be at least 12 characters; administrator passwords must be at least 14 characters. EAP-MSCHAPv2 requires recoverable VPN passwords, so they are stored in the restricted database and strongSwan credentials file. Administrator passwords are salted scrypt hashes.
+VPN passwords must be at least 12 characters; administrator passwords must be at least 14 characters. IKEv2 authentication requires recoverable VPN passwords, so they are stored in the restricted database and local FreeRADIUS users file. Administrator passwords are salted scrypt hashes. Also allow UDP 51820 in the VPS provider firewall for WireGuard.
 
 ### Back up and migrate
 

@@ -63,8 +63,8 @@ if ip -6 route get 2606:4700:4700::1111 >/dev/null 2>&1 && ip -6 -o addr show de
 echo '[1/10] Installing system packages…'
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq strongswan-swanctl charon-systemd strongswan-pki libcharon-extra-plugins \
-  nginx certbot python3-certbot-nginx python3-flask gunicorn ufw iptables curl openssl sudo
+apt-get install -y -qq strongswan-swanctl charon-systemd strongswan-pki libcharon-extra-plugins libcharon-extauth-plugins \
+  freeradius freeradius-utils wireguard-tools nginx certbot python3-certbot-nginx python3-flask gunicorn ufw iptables curl openssl sudo
 
 echo '[2/10] Preparing secure directories…'
 getent group ikev2-panel >/dev/null || groupadd --system ikev2-panel
@@ -75,6 +75,8 @@ install -d -o root -g ikev2-panel -m 750 /etc/ikev2-manager
 install -d -o root -g root -m 755 /etc/swanctl/conf.d /etc/swanctl/private /etc/swanctl/x509 /etc/swanctl/x509ca
 install -d -o root -g root -m 755 /etc/letsencrypt/renewal-hooks/deploy
 install -o root -g root -m 640 "$ROOT_DIR/server/app.py" /opt/ikev2-manager/app.py
+install -o root -g root -m 640 "$ROOT_DIR/server/accounting_worker.py" /opt/ikev2-manager/accounting_worker.py
+install -o root -g root -m 640 "$ROOT_DIR/server/telegram_worker.py" /opt/ikev2-manager/telegram_worker.py
 install -o root -g root -m 750 "$ROOT_DIR/server/privileged_helper.py" /usr/local/sbin/ikev2-panel-helper
 cp -a "$ROOT_DIR/web/dist/." /opt/ikev2-manager/web/dist/
 chmod -R a+rX /opt/ikev2-manager
@@ -98,6 +100,7 @@ if [[ -n "$RESTORE_FILE" ]]; then
   fi
   mkdir "$RESTORE_TMP/data"
   tar -xzf "$RESTORE_TMP/archive.tar.gz" -C "$RESTORE_TMP/data" --no-same-owner panel.sqlite3 ca-private-key.pem ca-root.pem
+  if tar -tzf "$RESTORE_TMP/archive.tar.gz" | grep -Fxq 'wg-server-private.key'; then tar -xzf "$RESTORE_TMP/archive.tar.gz" -C "$RESTORE_TMP/data" --no-same-owner wg-server-private.key; fi
   [[ -f "$RESTORE_TMP/data/panel.sqlite3" && -f "$RESTORE_TMP/data/ca-private-key.pem" && -f "$RESTORE_TMP/data/ca-root.pem" ]] || { echo 'Backup is incomplete or incompatible.' >&2; exit 1; }
 fi
 
@@ -154,7 +157,7 @@ connections {
       id = $DOMAIN
     }
     remote {
-      auth = eap-mschapv2
+      auth = eap-radius
       eap_id = %any
     }
     children {
@@ -177,7 +180,74 @@ chmod 600 /etc/swanctl/swanctl.conf
 printf 'secrets {\n}\n' > /etc/swanctl/conf.d/ikev2-manager-users.conf
 chmod 600 /etc/swanctl/conf.d/ikev2-manager-users.conf
 
-echo '[5/10] Enabling routing and firewall rules…'
+echo '[5/11] Configuring local RADIUS accounting and device limits…'
+RADIUS_SECRET="$(openssl rand -hex 32)"
+cat > /etc/strongswan.d/charon/eap-radius.conf <<EOF
+eap-radius {
+  load = yes
+  accounting = yes
+  accounting_interval = 10
+  servers {
+    localhost {
+      address = 127.0.0.1
+      secret = $RADIUS_SECRET
+      auth_port = 1812
+      acct_port = 1813
+    }
+  }
+}
+EOF
+chmod 600 /etc/strongswan.d/charon/eap-radius.conf
+python3 - "$RADIUS_SECRET" <<'PY'
+import pathlib,re,sys
+p=pathlib.Path('/etc/freeradius/3.0/clients.conf')
+s=p.read_text()
+block='client localhost {\n\tipaddr = 127.0.0.1\n\tsecret = '+sys.argv[1]+'\n\t proto = *\n}\n'
+if re.search(r'(?ms)^client localhost\s*\{.*?^\}',s): s=re.sub(r'(?ms)^client localhost\s*\{.*?^\}',block.rstrip(),s,count=1)
+else: s += '\n'+block
+p.write_text(s)
+site=pathlib.Path('/etc/freeradius/3.0/sites-enabled/default')
+if site.exists():
+    s=site.read_text()
+    # radutmp records authenticated sessions for Simultaneous-Use checks.
+    if re.search(r'(?m)^session\s*\{',s) and not re.search(r'(?ms)^session\s*\{[^}]*\bradutmp\b',s):
+        s=re.sub(r'(?m)^session\s*\{', 'session {\n\tradutmp',s,count=1)
+    if re.search(r'(?m)^accounting\s*\{',s) and not re.search(r'(?ms)^accounting\s*\{[^}]*\bradutmp\b',s):
+        s=re.sub(r'(?m)^accounting\s*\{', 'accounting {\n\tradutmp',s,count=1)
+    site.write_text(s)
+PY
+freeradius -XC >/dev/null
+systemctl enable --now freeradius.service
+
+echo '[6/11] Preparing WireGuard…'
+install -d -o root -g root -m 700 /etc/wireguard
+if [[ -n "$RESTORE_FILE" && -f "$RESTORE_TMP/data/wg-server-private.key" ]]; then
+  install -o root -g root -m 600 "$RESTORE_TMP/data/wg-server-private.key" /etc/wireguard/server_private
+else
+  umask 077; wg genkey > /etc/wireguard/server_private
+fi
+wg pubkey < /etc/wireguard/server_private > /etc/wireguard/server_public
+chmod 600 /etc/wireguard/server_private /etc/wireguard/server_public
+WG_PRIVATE="$(cat /etc/wireguard/server_private)"
+WG6_ADDRESS=''
+WG6_UP=''
+WG6_DOWN=''
+if [[ "$IPV6" == 1 ]]; then
+  WG6_ADDRESS=', fd88:2026:10::1/64'
+  WG6_UP='; ip6tables -t nat -A POSTROUTING -s fd88:2026:10::/64 -o '$IFACE' -j MASQUERADE; ip6tables -A FORWARD -i wg0 -o '$IFACE' -j ACCEPT; ip6tables -A FORWARD -i '$IFACE' -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT'
+  WG6_DOWN='; ip6tables -t nat -D POSTROUTING -s fd88:2026:10::/64 -o '$IFACE' -j MASQUERADE; ip6tables -D FORWARD -i wg0 -o '$IFACE' -j ACCEPT; ip6tables -D FORWARD -i '$IFACE' -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT'
+fi
+cat > /etc/wireguard/wg0.conf <<EOF
+[Interface]
+Address = 10.88.0.1/24$WG6_ADDRESS
+ListenPort = 51820
+PrivateKey = $WG_PRIVATE
+PostUp = iptables -t nat -A POSTROUTING -s 10.88.0.0/24 -o $IFACE -j MASQUERADE; iptables -A FORWARD -i wg0 -o $IFACE -j ACCEPT; iptables -A FORWARD -i $IFACE -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT$WG6_UP
+PostDown = iptables -t nat -D POSTROUTING -s 10.88.0.0/24 -o $IFACE -j MASQUERADE; iptables -D FORWARD -i wg0 -o $IFACE -j ACCEPT; iptables -D FORWARD -i $IFACE -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT$WG6_DOWN
+EOF
+chmod 600 /etc/wireguard/wg0.conf
+
+echo '[7/11] Enabling routing and firewall rules…'
 cat > /etc/sysctl.d/99-ikev2-manager.conf <<EOF
 net.ipv4.ip_forward=1
 net.ipv6.conf.all.forwarding=$IPV6
@@ -213,23 +283,74 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 EOF
+cat > /etc/systemd/system/forge-connect-accounting.service <<'EOF'
+[Unit]
+Description=Forge Connect VPN quota and accounting collector
+After=strongswan.service freeradius.service wg-quick@wg0.service
+Wants=strongswan.service freeradius.service wg-quick@wg0.service
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /opt/ikev2-manager/accounting_worker.py
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/ikev2-manager /etc/swanctl/conf.d /etc/freeradius/3.0/mods-config/files/authorize /etc/wireguard
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+[Install]
+WantedBy=multi-user.target
+EOF
+cat > /etc/systemd/system/forge-connect-telegram.service <<'EOF'
+[Unit]
+Description=Forge Connect Telegram sales bot
+After=network-online.target ikev2-manager.service
+Wants=network-online.target
+[Service]
+Type=simple
+User=ikev2-panel
+Group=ikev2-panel
+WorkingDirectory=/opt/ikev2-manager
+ExecStart=/usr/bin/python3 /opt/ikev2-manager/telegram_worker.py
+Restart=always
+RestartSec=5
+UMask=0077
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/var/lib/ikev2-manager
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+[Install]
+WantedBy=multi-user.target
+EOF
 SSH_PORTS="$(sshd -T 2>/dev/null | awk '$1=="port" {print $2}' | sort -u || true)"
 [[ -n "$SSH_PORTS" ]] || SSH_PORTS='22'
 for port in $SSH_PORTS; do ufw allow "$port/tcp" >/dev/null; done
 ufw allow 500,4500/udp >/dev/null
+ufw allow 51820/udp >/dev/null
 ufw allow 80/tcp >/dev/null
 ufw allow 443/tcp >/dev/null
 ufw route allow in on "$IFACE" out on "$IFACE" from "$VPN4" >/dev/null
+ufw route allow in on wg0 out on "$IFACE" from 10.88.0.0/24 >/dev/null
+if [[ "$IPV6" == 1 ]]; then ufw route allow in on wg0 out on "$IFACE" from fd88:2026:10::/64 >/dev/null; fi
 if [[ "$IPV6" == 1 ]]; then ufw route allow in on "$IFACE" out on "$IFACE" from "$VPN6" >/dev/null; fi
 if ! ufw status | grep -q '^Status: active'; then ufw --force enable >/dev/null; fi
 systemctl daemon-reload
-systemctl enable --now ufw.service ikev2-manager-firewall.service
+systemctl enable --now ufw.service ikev2-manager-firewall.service wg-quick@wg0.service
 
-echo '[6/10] Starting strongSwan…'
+echo '[8/11] Starting strongSwan…'
 systemctl enable --now strongswan.service
 swanctl --load-all >/dev/null
 
-echo '[7/10] Configuring HTTPS and the web front end…'
+echo '[9/11] Configuring HTTPS and the web front end…'
 cat > /etc/nginx/conf.d/ikev2-manager-rate.conf <<'EOF'
 limit_req_zone $binary_remote_addr zone=ikev2_login:10m rate=6r/m;
 EOF
@@ -274,7 +395,7 @@ server {
     add_header X-Content-Type-Options nosniff always;
     add_header X-Frame-Options DENY always;
     add_header Referrer-Policy no-referrer always;
-    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' https: data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'" always;
     root /opt/ikev2-manager/web/dist;
     index index.html;
     client_max_body_size 64k;
@@ -320,7 +441,7 @@ systemctl reload nginx
 EOF
 chmod 750 /etc/letsencrypt/renewal-hooks/deploy/ikev2-manager-reload-nginx
 
-echo '[8/10] Installing the least-privilege management service…'
+echo '[10/11] Installing the least-privilege management service…'
 cat > /etc/sudoers.d/ikev2-panel <<'EOF'
 ikev2-panel ALL=(root) NOPASSWD: /usr/local/sbin/ikev2-panel-helper
 EOF
@@ -346,7 +467,7 @@ ProtectHome=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
-ReadWritePaths=/var/lib/ikev2-manager /etc/swanctl/conf.d /etc/ikev2-manager
+ReadWritePaths=/var/lib/ikev2-manager /etc/swanctl/conf.d /etc/ikev2-manager /etc/freeradius/3.0/mods-config/files/authorize /etc/wireguard
 ReadOnlyPaths=/etc/swanctl/x509ca
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 [Install]
@@ -374,17 +495,24 @@ if [[ "$(systemctl is-active ikev2-manager.service)" != active || "$(systemctl i
   echo 'One or more services did not start. Inspect: journalctl -u ikev2-manager -u strongswan -n 100' >&2; exit 1
 fi
 
-echo '[9/10] Synchronizing VPN users…'
+echo '[11/11] Synchronizing VPN users…'
 if [[ -n "$RESTORE_FILE" ]]; then
   python3 - <<'PY' | /usr/local/sbin/ikev2-panel-helper sync-users >/dev/null
 import json, sqlite3
 db=sqlite3.connect('/var/lib/ikev2-manager/panel.sqlite3')
-print(json.dumps([{'username':u,'password':p} for u,p in db.execute('SELECT username,vpn_password FROM vpn_users WHERE enabled=1')]))
+print(json.dumps([{'username':u,'password':p,'maxConnections':m} for u,p,m in db.execute('SELECT username,vpn_password,max_connections FROM vpn_users WHERE enabled=1')]))
 PY
 else
   printf '[]' | /usr/local/sbin/ikev2-panel-helper sync-users >/dev/null
 fi
+python3 - <<'PY' | /usr/local/sbin/ikev2-panel-helper sync-wireguard >/dev/null
+import json,sqlite3
+c=sqlite3.connect('/var/lib/ikev2-manager/panel.sqlite3')
+print(json.dumps([{'publicKey':k,'address':a} for k,a in c.execute('SELECT public_key,assigned_ip FROM wireguard_peers WHERE revoked=0')]))
+PY
 swanctl --load-conns >/dev/null
+systemctl enable --now forge-connect-accounting.service
+systemctl enable --now forge-connect-telegram.service
 nginx -t >/dev/null
 
 echo '[10/10] Finished.'
@@ -392,6 +520,7 @@ echo
 echo "Panel: https://$DOMAIN"
 echo "VPN server: $DOMAIN"
 if [[ "$IPV6" == 1 ]]; then echo 'IPv6: enabled'; else echo 'IPv6: skipped (no working public IPv6 route detected)'; fi
+echo 'Protocols: IKEv2 + WireGuard (allow UDP 51820 in the VPS provider firewall).'
 if [[ -n "$RESTORE_FILE" ]]; then
   echo 'Existing admin account, VPN users, audit history and CA identity were restored.'
 else
