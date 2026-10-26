@@ -34,6 +34,7 @@ def sync_users():
             raise ValueError('invalid account')
         username, password = row.get('username', ''), row.get('password', '')
         maximum = row.get('maxConnections', 1)
+        protocols = row.get('protocols', ['ikev2'])
         if not isinstance(username, str) or not VALID_USER.fullmatch(username):
             raise ValueError('invalid username')
         if username in seen:
@@ -42,9 +43,14 @@ def sync_users():
             raise ValueError('invalid password')
         if not isinstance(maximum, int) or maximum < 1 or maximum > 50:
             raise ValueError('invalid simultaneous connection limit')
+        if not isinstance(protocols, list) or not protocols or any(p not in ('ikev2','ocserv') for p in protocols):
+            raise ValueError('invalid RADIUS protocols')
         seen.add(username)
-        radius_lines.extend([f'{username} Cleartext-Password := "{password}"',
-                             f'    Simultaneous-Use := {maximum}', ''])
+        for protocol, nas in (('ikev2','forge-ikev2'),('ocserv','forge-ocserv')):
+            if protocol in protocols:
+                radius_lines.extend([f'{username} Cleartext-Password := "{password}", NAS-Identifier == "{nas}"',
+                                     f'    Simultaneous-Use := {maximum}',
+                                     '    Fall-Through = Yes', ''])
     lines.append('}')
     content = '\n'.join(lines) + '\n'
     USERS_FILE.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
@@ -196,7 +202,31 @@ def revoke_user(username):
             if closed.returncode:
                 raise RuntimeError(closed.stderr[-500:] or 'could not terminate session')
             terminated += 1
+    if run(['/usr/bin/systemctl','is-active','--quiet','ocserv.service']).returncode == 0:
+        run(['/usr/bin/occtl','terminate','user',username],timeout=12)
     return {'ok': True, 'terminated': terminated}
+
+def revoke_ocserv_user(username):
+    if not isinstance(username, str) or not VALID_USER.fullmatch(username):
+        raise ValueError('invalid username')
+    if run(['/usr/bin/systemctl','is-active','--quiet','ocserv.service']).returncode != 0:
+        return {'ok':True,'terminated':False}
+    result=run(['/usr/bin/occtl','terminate','user',username],timeout=12)
+    if result.returncode and 'not connected' not in result.stderr.lower():
+        raise RuntimeError(result.stderr[-500:] or 'could not terminate OpenConnect session')
+    return {'ok':True,'terminated':result.returncode==0}
+
+def ocserv_users():
+    if run(['/usr/bin/systemctl','is-active','--quiet','ocserv.service']).returncode != 0:
+        return {'ok':True,'users':[]}
+    result=run(['/usr/bin/occtl','--json','show','users'],timeout=12)
+    if result.returncode:
+        raise RuntimeError(result.stderr[-800:] or 'could not read OpenConnect sessions')
+    try:
+        data=json.loads(result.stdout or '[]')
+    except json.JSONDecodeError:
+        raise RuntimeError('occtl returned invalid JSON')
+    return {'ok':True,'users':data}
 
 def status():
     unit = run(['/usr/bin/systemctl', 'is-active', 'strongswan.service'])
@@ -224,6 +254,11 @@ def main():
         result = revoke_wireguard_peer(body.get('publicKey',''))
     elif operation == 'list-sas':
         result = list_sas()
+    elif operation == 'ocserv-users':
+        result = ocserv_users()
+    elif operation == 'revoke-ocserv-user':
+        body=json.loads(sys.stdin.read(4096))
+        result=revoke_ocserv_user(body.get('username',''))
     elif operation == 'revoke-user':
         body = json.loads(sys.stdin.read(4096))
         result = revoke_user(body.get('username', ''))

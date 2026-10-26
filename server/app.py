@@ -497,12 +497,15 @@ def update_admin():
 
 def sync_enabled_users():
     with connect() as con:
-        rows = con.execute('''SELECT username,vpn_password,max_connections FROM vpn_users
+        rows = con.execute('''SELECT username,vpn_password,max_connections,protocols FROM vpn_users
           WHERE enabled=1 AND (expires_at IS NULL OR expires_at>?)
           AND (quota_bytes=0 OR used_up_bytes+used_down_bytes<quota_bytes)
-          AND instr(','||protocols||',',',ikev2,')>0 ORDER BY username''',(now(),)).fetchall()
+          AND (instr(','||protocols||',',',ikev2,')>0 OR instr(','||protocols||',',',ocserv,')>0)
+          ORDER BY username''',(now(),)).fetchall()
     return helper('sync-users', [{'username': r['username'], 'password': r['vpn_password'],
-                                  'maxConnections':r['max_connections']} for r in rows])
+                                  'maxConnections':r['max_connections'],
+                                  'protocols':[p for p in r['protocols'].split(',') if p in ('ikev2','ocserv')]}
+                                 for r in rows])
 
 def active_connections():
     output = helper('list-sas').get('output', '')
@@ -525,6 +528,25 @@ def active_connections():
 
 def all_active_connections():
     active=active_connections()
+    try:
+        ocserv=helper('ocserv-users').get('users',[])
+        if isinstance(ocserv,dict): ocserv=ocserv.get('users',ocserv.get('connections',[]))
+        if isinstance(ocserv,list):
+            for index,row in enumerate(ocserv):
+                if not isinstance(row,dict): continue
+                username=next((row.get(key) for key in ('username','user-name','user_name','user')
+                               if isinstance(row.get(key),str) and row.get(key)),None)
+                if not username: continue
+                remote=next((row.get(key) for key in ('remote-ip','remote_ip','remote','remote-address')
+                             if isinstance(row.get(key),str)), 'OpenConnect')
+                address=' '.join(str(row[key]) for key in ('ipv4','ipv6','ipv4-address','ipv6-address')
+                                 if isinstance(row.get(key),str) and row[key])
+                sid=next((row.get(key) for key in ('id','session-id','session_id')
+                          if isinstance(row.get(key),(str,int))),f'oc-{username}-{index}')
+                active.append({'id':f'oc-{sid}','state':'ESTABLISHED','username':username,
+                               'remote':remote,'virtualAddresses':address,'protocol':'OpenConnect'})
+    except Exception:
+        pass
     try: peers=helper('wireguard-stats').get('peers',[])
     except Exception: peers=[]
     if not peers:return active
@@ -556,8 +578,9 @@ def list_users():
     active = all_active_connections()
     active_counts = {}
     for item in active:
-        counts=active_counts.setdefault(item['username'],{'ikev2':0,'wireguard':0})
-        counts['wireguard' if item.get('protocol')=='WireGuard' else 'ikev2']+=1
+        counts=active_counts.setdefault(item['username'],{'ikev2':0,'wireguard':0,'ocserv':0})
+        key={'WireGuard':'wireguard','OpenConnect':'ocserv'}.get(item.get('protocol'),'ikev2')
+        counts[key]+=1
     with connect() as con:
         rows = con.execute('''SELECT id,username,enabled,note,created_at,quota_bytes,used_up_bytes,
             used_down_bytes,expires_at,max_connections,protocols,portal_password_hash,
@@ -568,6 +591,7 @@ def list_users():
                            'activeConnections': sum(active_counts.get(r['username'],{}).values()),
                            'ikeConnections':active_counts.get(r['username'],{}).get('ikev2',0),
                            'wireguardConnections':active_counts.get(r['username'],{}).get('wireguard',0),
+                           'ocservConnections':active_counts.get(r['username'],{}).get('ocserv',0),
                            'wireguardDevices':r['wg_devices'],
                            'quotaBytes':r['quota_bytes'],'usedBytes':r['used_up_bytes']+r['used_down_bytes'],
                            'uploadBytes':r['used_up_bytes'],'downloadBytes':r['used_down_bytes'],
@@ -593,7 +617,7 @@ def create_user():
         return jsonify(error='مدت اعتبار نامعتبر است.'),400
     if isinstance(maximum,bool) or not isinstance(maximum,int) or maximum<1 or maximum>50:
         return jsonify(error='سقف اتصال باید بین ۱ تا ۵۰ باشد.'),400
-    if not isinstance(protocols,list) or not protocols or any(p not in ('ikev2','wireguard') for p in protocols):
+    if not isinstance(protocols,list) or not protocols or any(p not in ('ikev2','wireguard','ocserv') for p in protocols):
         return jsonify(error='پروتکل انتخاب‌شده معتبر نیست.'),400
     quota_bytes=int(quota_gb*1_000_000_000) if quota_gb else 0
     expires_at=now()+days*86400 if days else None
@@ -615,7 +639,7 @@ def create_user():
         with connect() as con: con.execute('DELETE FROM vpn_users WHERE username=?', (username,))
         return jsonify(error=str(error)), 500
     audit(g.admin['username'],'user_created',username)
-    return jsonify(ok=True, username=username, password=password, portalUsername=username,
+    return jsonify(ok=True, username=username, password=password, protocols=sorted(set(protocols)), portalUsername=username,
         portalPassword=password, portalUrl=request.host_url.rstrip('/')+'/portal'), 201
 
 @APP.patch('/api/users/<int:user_id>')
@@ -647,7 +671,7 @@ def update_user(user_id):
             fields.append('max_connections=?');values.append(value)
         if 'protocols' in data:
             value=data['protocols']
-            if not isinstance(value,list) or not value or any(p not in ('ikev2','wireguard') for p in value):return jsonify(error='پروتکل نامعتبر است.'),400
+            if not isinstance(value,list) or not value or any(p not in ('ikev2','wireguard','ocserv') for p in value):return jsonify(error='پروتکل نامعتبر است.'),400
             fields.append('protocols=?');values.append(','.join(sorted(set(value))))
         values.append(user_id)
         con.execute('UPDATE vpn_users SET '+','.join(fields)+' WHERE id=?',values)
@@ -656,6 +680,8 @@ def update_user(user_id):
         sync_enabled_users()
         sync_wireguard_peers()
         if not enabled: helper('revoke-user', {'username': row['username']})
+        elif 'protocols' in data and 'ocserv' in row['protocols'].split(',') and 'ocserv' not in data['protocols']:
+            helper('revoke-ocserv-user', {'username': row['username']})
     except Exception as error:
         with connect() as con:
             for col in ('enabled','quota_bytes','expires_at','max_connections','protocols'):

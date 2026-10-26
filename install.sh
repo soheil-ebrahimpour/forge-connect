@@ -17,6 +17,9 @@ if [[ ! -r /etc/os-release ]]; then echo 'Ubuntu 24.04 is required.' >&2; exit 1
 if [[ -e /etc/ikev2-manager || -e /etc/swanctl/swanctl.conf ]]; then
   echo 'An existing VPN or manager configuration was found. This installer is for a fresh server and will not overwrite it.' >&2; exit 1
 fi
+if [[ -e /etc/ocserv/ocserv.conf ]]; then
+  echo 'An existing ocserv configuration was found. This installer is for a fresh server and will not replace it.' >&2; exit 1
+fi
 if [[ -d /etc/nginx/sites-enabled ]]; then
   for site in /etc/nginx/sites-enabled/*; do
     [[ -e "$site" || -L "$site" ]] || continue
@@ -57,6 +60,8 @@ IFACE="$(ip -o -4 route show default | awk 'NR==1 {print $5}')"
 [[ "$IFACE" =~ ^[A-Za-z0-9_.:-]+$ ]] || { echo 'Could not detect the public network interface.' >&2; exit 1; }
 VPN4='10.77.0.0/24'
 VPN6='fd77:2026:10::/64'
+OCSERV4='10.99.0.0/24'
+OCSERV6='fd99:2026:10::/64'
 IPV6=0
 if ip -6 route get 2606:4700:4700::1111 >/dev/null 2>&1 && ip -6 -o addr show dev "$IFACE" scope global | grep -qv 'fe80:'; then IPV6=1; fi
 
@@ -64,7 +69,8 @@ echo '[1/10] Installing system packages…'
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq strongswan-swanctl charon-systemd strongswan-pki libcharon-extra-plugins libcharon-extauth-plugins \
-  freeradius freeradius-utils wireguard-tools nginx certbot python3-certbot-nginx python3-flask gunicorn ufw iptables curl openssl sudo
+  freeradius freeradius-utils wireguard-tools ocserv nginx certbot python3-certbot-nginx python3-flask gunicorn ufw iptables curl openssl sudo
+systemctl disable --now ocserv.service 2>/dev/null || true
 
 echo '[2/10] Preparing secure directories…'
 getent group ikev2-panel >/dev/null || groupadd --system ikev2-panel
@@ -77,6 +83,12 @@ install -d -o root -g root -m 755 /etc/letsencrypt/renewal-hooks/deploy
 install -o root -g root -m 640 "$ROOT_DIR/server/app.py" /opt/ikev2-manager/app.py
 install -o root -g root -m 640 "$ROOT_DIR/server/accounting_worker.py" /opt/ikev2-manager/accounting_worker.py
 install -o root -g root -m 640 "$ROOT_DIR/server/telegram_worker.py" /opt/ikev2-manager/telegram_worker.py
+install -o root -g root -m 640 "$ROOT_DIR/server/ocserv_accounting.py" /opt/ikev2-manager/ocserv_accounting.py
+cat > /usr/local/sbin/forge-connect-ocserv-accounting <<'EOF'
+#!/bin/sh
+exec /usr/bin/python3 /opt/ikev2-manager/ocserv_accounting.py
+EOF
+chmod 750 /usr/local/sbin/forge-connect-ocserv-accounting
 install -o root -g root -m 750 "$ROOT_DIR/server/privileged_helper.py" /usr/local/sbin/ikev2-panel-helper
 cp -a "$ROOT_DIR/web/dist/." /opt/ikev2-manager/web/dist/
 chmod -R a+rX /opt/ikev2-manager
@@ -191,6 +203,7 @@ eap-radius {
     localhost {
       address = 127.0.0.1
       secret = $RADIUS_SECRET
+      nas_identifier = forge-ikev2
       auth_port = 1812
       acct_port = 1813
     }
@@ -215,9 +228,27 @@ if site.exists():
     if re.search(r'(?m)^accounting\s*\{',s) and not re.search(r'(?ms)^accounting\s*\{[^}]*\bradutmp\b',s):
         s=re.sub(r'(?m)^accounting\s*\{', 'accounting {\n\tradutmp',s,count=1)
     site.write_text(s)
+unique=pathlib.Path('/etc/freeradius/3.0/mods-available/acct_unique')
+if unique.exists():
+    s=unique.read_text()
+    if re.search(r'(?m)^\s*key\s*=',s):
+        s=re.sub(r'(?m)^\s*key\s*=.*$', 'key = "%{tolower:%{User-Name}}:%{Acct-Session-Id}:%{NAS-IP-Address}"', s, count=1)
+        unique.write_text(s)
 PY
 freeradius -XC >/dev/null
 systemctl enable --now freeradius.service
+install -d -o root -g root -m 750 /etc/radcli
+cat > /etc/radcli/radiusclient.conf <<'EOF'
+authserver 127.0.0.1:1812
+acctserver 127.0.0.1:1813
+servers /etc/radcli/servers
+dictionary /usr/share/freeradius/dictionary
+radius_timeout 5
+radius_retries 2
+bindaddr 127.0.0.1
+EOF
+printf '127.0.0.1 %s\n' "$RADIUS_SECRET" > /etc/radcli/servers
+chmod 600 /etc/radcli/servers
 
 echo '[6/11] Preparing WireGuard…'
 install -d -o root -g root -m 700 /etc/wireguard
@@ -262,12 +293,20 @@ VPN4='$VPN4'
 iptables -t nat -C POSTROUTING -s "\$VPN4" -o "\$IFACE" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s "\$VPN4" -o "\$IFACE" -j MASQUERADE
 iptables -C FORWARD -s "\$VPN4" -o "\$IFACE" -j ACCEPT 2>/dev/null || iptables -A FORWARD -s "\$VPN4" -o "\$IFACE" -j ACCEPT
 iptables -C FORWARD -d "\$VPN4" -i "\$IFACE" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -d "\$VPN4" -i "\$IFACE" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+OCSERV4='$OCSERV4'
+iptables -t nat -C POSTROUTING -s "\$OCSERV4" -o "\$IFACE" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s "\$OCSERV4" -o "\$IFACE" -j MASQUERADE
+iptables -C FORWARD -s "\$OCSERV4" -o "\$IFACE" -j ACCEPT 2>/dev/null || iptables -A FORWARD -s "\$OCSERV4" -o "\$IFACE" -j ACCEPT
+iptables -C FORWARD -d "\$OCSERV4" -i "\$IFACE" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -d "\$OCSERV4" -i "\$IFACE" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 EOF
 if [[ "$IPV6" == 1 ]]; then cat >> /usr/local/sbin/ikev2-manager-firewall <<EOF
 VPN6='$VPN6'
 ip6tables -t nat -C POSTROUTING -s "\$VPN6" -o "\$IFACE" -j MASQUERADE 2>/dev/null || ip6tables -t nat -A POSTROUTING -s "\$VPN6" -o "\$IFACE" -j MASQUERADE
 ip6tables -C FORWARD -s "\$VPN6" -o "\$IFACE" -j ACCEPT 2>/dev/null || ip6tables -A FORWARD -s "\$VPN6" -o "\$IFACE" -j ACCEPT
 ip6tables -C FORWARD -d "\$VPN6" -i "\$IFACE" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || ip6tables -A FORWARD -d "\$VPN6" -i "\$IFACE" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+OCSERV6='$OCSERV6'
+ip6tables -t nat -C POSTROUTING -s "\$OCSERV6" -o "\$IFACE" -j MASQUERADE 2>/dev/null || ip6tables -t nat -A POSTROUTING -s "\$OCSERV6" -o "\$IFACE" -j MASQUERADE
+ip6tables -C FORWARD -s "\$OCSERV6" -o "\$IFACE" -j ACCEPT 2>/dev/null || ip6tables -A FORWARD -s "\$OCSERV6" -o "\$IFACE" -j ACCEPT
+ip6tables -C FORWARD -d "\$OCSERV6" -i "\$IFACE" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || ip6tables -A FORWARD -d "\$OCSERV6" -i "\$IFACE" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 EOF
 fi
 chmod 750 /usr/local/sbin/ikev2-manager-firewall
@@ -338,7 +377,11 @@ ufw allow 500,4500/udp >/dev/null
 ufw allow 51820/udp >/dev/null
 ufw allow 80/tcp >/dev/null
 ufw allow 443/tcp >/dev/null
+ufw allow 8443/tcp >/dev/null
+ufw allow 8443/udp >/dev/null
 ufw route allow in on "$IFACE" out on "$IFACE" from "$VPN4" >/dev/null
+ufw route allow from "$OCSERV4" to any >/dev/null
+if [[ "$IPV6" == 1 ]]; then ufw route allow from "$OCSERV6" to any >/dev/null; fi
 ufw route allow in on wg0 out on "$IFACE" from 10.88.0.0/24 >/dev/null
 if [[ "$IPV6" == 1 ]]; then ufw route allow in on wg0 out on "$IFACE" from fd88:2026:10::/64 >/dev/null; fi
 if [[ "$IPV6" == 1 ]]; then ufw route allow in on "$IFACE" out on "$IFACE" from "$VPN6" >/dev/null; fi
@@ -435,9 +478,39 @@ server {
     return 444;
 }
 EOF
+echo '[10/12] Configuring OpenConnect (ocserv)…'
+OCSERV_V6=''
+if [[ "$IPV6" == 1 ]]; then OCSERV_V6="ipv6-network = $OCSERV6"; fi
+cat > /etc/ocserv/ocserv.conf <<EOF
+auth = "radius[config=/etc/radcli/radiusclient.conf,nas-identifier=forge-ocserv]"
+acct = "radius[config=/etc/radcli/radiusclient.conf]"
+tcp-port = 8443
+udp-port = 8443
+server-cert = /etc/letsencrypt/live/$DOMAIN/fullchain.pem
+server-key = /etc/letsencrypt/live/$DOMAIN/privkey.pem
+run-as-user = nobody
+run-as-group = nogroup
+use-occtl = true
+device = vpns
+max-clients = 512
+max-same-clients = 50
+stats-report-time = 5
+server-stats-reset-time = 604800
+ipv4-network = $OCSERV4
+$OCSERV_V6
+route = default
+dns = 1.1.1.1
+dns = 1.0.0.1
+disconnect-script = /usr/local/sbin/forge-connect-ocserv-accounting
+EOF
+chmod 640 /etc/ocserv/ocserv.conf
+ocserv -t -c /etc/ocserv/ocserv.conf
+systemctl enable --now ocserv.service
+
 cat > /etc/letsencrypt/renewal-hooks/deploy/ikev2-manager-reload-nginx <<'EOF'
 #!/bin/sh
 systemctl reload nginx
+systemctl reload-or-restart ocserv
 EOF
 chmod 750 /etc/letsencrypt/renewal-hooks/deploy/ikev2-manager-reload-nginx
 
@@ -491,8 +564,8 @@ systemctl enable --now ikev2-manager.service
 nginx -t
 systemctl reload nginx
 sleep 1
-if [[ "$(systemctl is-active ikev2-manager.service)" != active || "$(systemctl is-active strongswan.service)" != active ]]; then
-  echo 'One or more services did not start. Inspect: journalctl -u ikev2-manager -u strongswan -n 100' >&2; exit 1
+if [[ "$(systemctl is-active ikev2-manager.service)" != active || "$(systemctl is-active strongswan.service)" != active || "$(systemctl is-active ocserv.service)" != active ]]; then
+  echo 'One or more services did not start. Inspect: journalctl -u ikev2-manager -u strongswan -u ocserv -n 100' >&2; exit 1
 fi
 
 echo '[11/11] Synchronizing VPN users…'
@@ -500,7 +573,7 @@ if [[ -n "$RESTORE_FILE" ]]; then
   python3 - <<'PY' | /usr/local/sbin/ikev2-panel-helper sync-users >/dev/null
 import json, sqlite3
 db=sqlite3.connect('/var/lib/ikev2-manager/panel.sqlite3')
-print(json.dumps([{'username':u,'password':p,'maxConnections':m} for u,p,m in db.execute('SELECT username,vpn_password,max_connections FROM vpn_users WHERE enabled=1')]))
+print(json.dumps([{'username':u,'password':p,'maxConnections':m,'protocols':[x for x in protocols.split(',') if x in ('ikev2','ocserv')]} for u,p,m,protocols in db.execute("SELECT username,vpn_password,max_connections,protocols FROM vpn_users WHERE enabled=1 AND (instr(','||protocols||',',',ikev2,')>0 OR instr(','||protocols||',',',ocserv,')>0) ")]))
 PY
 else
   printf '[]' | /usr/local/sbin/ikev2-panel-helper sync-users >/dev/null
@@ -520,7 +593,7 @@ echo
 echo "Panel: https://$DOMAIN"
 echo "VPN server: $DOMAIN"
 if [[ "$IPV6" == 1 ]]; then echo 'IPv6: enabled'; else echo 'IPv6: skipped (no working public IPv6 route detected)'; fi
-echo 'Protocols: IKEv2 + WireGuard (allow UDP 51820 in the VPS provider firewall).'
+echo 'Protocols: IKEv2, WireGuard (UDP 51820) and OpenConnect (TCP/UDP 8443).'
 if [[ -n "$RESTORE_FILE" ]]; then
   echo 'Existing admin account, VPN users, audit history and CA identity were restored.'
 else

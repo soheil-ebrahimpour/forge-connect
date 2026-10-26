@@ -10,6 +10,7 @@
 
 - نصب strongSwan و IKEv2 با احراز هویت EAP از طریق FreeRADIUS
 - WireGuard با ساخت پروفایل جداگانه برای هر دستگاه
+- OpenConnect/ocserv با احراز هویت و حسابداری مشترک FreeRADIUS
 - ساخت گواهی سرور و CA ریشه برای اعتماد دستگاه‌های کاربران
 - NAT برای IPv4 و فعال‌سازی IPv6 در صورت وجود مسیر عمومی IPv6 روی VPS
 - تنظیم UFW با حفظ پورت SSH و باز کردن پورت‌های VPN و وب
@@ -17,7 +18,7 @@
 - پنل React دوزبانهٔ فارسی (RTL) و انگلیسی (LTR)، با فونت‌های محلی Vazirmatn و Inter
 - پورتال جداگانهٔ کاربر برای مشاهدهٔ مصرف واقعی، اعتبار، تغییر رمز، درخواست تمدید و دریافت پروفایل‌ها
 - تنظیم حجم مجاز، مدت اعتبار، پروتکل‌ها و سقف اتصال IKEv2 برای هر حساب
-- ثبت ترافیک IKEv2 و WireGuard و غیرفعال‌کردن خودکار حساب پس از انقضا یا پایان سهمیه
+- ثبت ترافیک IKEv2، WireGuard و OpenConnect و غیرفعال‌کردن خودکار حساب پس از انقضا یا پایان سهمیه
 - ساخت، غیرفعال‌کردن، فعال‌سازی مجدد، تغییر رمز و حذف کاربران VPN
 - طرح‌های تمدید، بررسی دستی رسیدها و ربات فروش تلگرام با تحویل خودکار حساب تأییدشده
 - راهنمای تصویری فارسی/انگلیسی برای Windows، Android و iOS در پورتال کاربر
@@ -31,10 +32,10 @@
 
 - VPS تازه با Ubuntu Server 24.04 LTS و دسترسی root
 - رکورد DNS نوع A که به IPv4 عمومی VPS اشاره کند
-- دسترسی ورودی TCP پورت‌های 80 و 443 و UDP پورت‌های 500، 4500 و 51820
+- دسترسی ورودی TCP پورت‌های 80، 443 و 8443؛ UDP پورت‌های 500، 4500، 51820 و 8443
 - اگر ارائه‌دهنده فایروال یا Security Group جداگانه دارد، همین پورت‌ها باید آنجا هم باز شوند
 
-نصب‌کننده عمداً روی نصب موجود strongSwan یا سایت Nginx دیگری اجرا نمی‌شود تا پیکربندی قبلی را بازنویسی نکند. نصب بسته‌های سیستم، گواهی اولیه و سرویس‌ها در اولین راه‌اندازی با اسکریپت انجام می‌شود؛ مدیریت حساب‌های روزمره از پنل است.
+نصب‌کننده روی پیکربندی موجود strongSwan، ocserv یا سایت Nginx اجرا نمی‌شود تا تنظیم قبلی را بازنویسی نکند. نصب IKEv2، WireGuard، OpenConnect، forwarding و NAT پایدار IPv4/IPv6 (در صورت وجود IPv6)، UFW، Nginx، HTTPS و پنل در نصب اولیه انجام می‌شود؛ مدیریت روزمره حساب‌ها از پنل است.
 
 ### نصب اولیه
 
@@ -54,17 +55,19 @@ sudo VPN_DOMAIN=vpn.example.com ACME_EMAIL=admin@example.com bash ./install.sh
 
 ### کارهای پنل وب
 
-بعد از نصب اولیه، مدیر از پنل برای ساخت کاربران و تنظیم سهمیه، اعتبار، پروتکل و سقف IKEv2 استفاده می‌کند. تنظیم فروش تلگرام، کارت پرداخت، طرح‌ها، رسیدها و درخواست‌های تمدید نیز در بخش تنظیمات است. برای هر کاربر نشانی `/portal` و مشخصات اولیه را بفرستید؛ کاربر در آنجا مصرف و اعتبارش را می‌بیند، رمز را تغییر می‌دهد، تمدید می‌خواهد و پروفایل دستگاه می‌گیرد. رمز جدید فقط هنگام ساخت یا بازنشانی نمایش داده می‌شود.
+بعد از نصب اولیه، مدیر از پنل برای ساخت کاربران و تنظیم سهمیه، اعتبار، پروتکل و سقف نشست استفاده می‌کند. تنظیم فروش تلگرام، کارت پرداخت، طرح‌ها، رسیدها و درخواست‌های تمدید نیز در بخش تنظیمات است. برای هر کاربر نشانی `/portal` و مشخصات اولیه را بفرستید؛ کاربر در آنجا مصرف و اعتبارش را می‌بیند، رمز را تغییر می‌دهد، تمدید می‌خواهد و پروفایل دستگاه می‌گیرد. رمز جدید فقط هنگام ساخت یا بازنشانی نمایش داده می‌شود.
 
-سقف IKEv2 با Simultaneous-Use در FreeRADIUS اعمال می‌شود. سقف WireGuard در تعداد پروفایل‌های دستگاه حساب اعمال می‌شود؛ WireGuard به‌تنهایی هویت کاربر/دستگاه را در سطح نشست‌هایی مثل RADIUS ارائه نمی‌کند، بنابراین سقف دو پروتکل در این نسخه یک شمارندهٔ مشترک واحد نیست.
+سقف نشست IKEv2 و OpenConnect با Simultaneous-Use در FreeRADIUS و حسابداری نشست اعمال می‌شود. سقف WireGuard در تعداد پروفایل‌های دستگاه حساب اعمال می‌شود؛ WireGuard به‌تنهایی هویت کاربر/دستگاه را در سطح نشست‌هایی مثل RADIUS ارائه نمی‌کند؛ سقف آن شمارندهٔ مشترک با دو پروتکل دیگر نیست.
 
 برای افزودن دامنهٔ جدید یا انتقال سرویس به VPS تازه، همچنان باید DNS و دسترسی شبکهٔ ارائه‌دهنده را تنظیم کنید. جابه‌جایی سرور از مسیر بکاپ/بازیابی توضیح داده شده است. پنل فعلی ویرایش آزاد تنظیمات سیستم‌عامل یا فایروال ارائه‌دهنده را انجام نمی‌دهد.
 
 ### اتصال دستگاه‌ها
 
+OpenConnect روی `8443/TCP+UDP` و با مسیر پیش‌فرض full-tunnel تنظیم می‌شود. نصب‌کننده برای poolهای VPN قواعد forwarding و NAT را به‌صورت پایدار می‌سازد و DNS تونل را تنظیم می‌کند؛ اگر VPS مسیر عمومی IPv6 داشته باشد، pool و forwarding/NAT IPv6 نیز فعال می‌شود. بدون IPv6 عمومی روی VPS، تونل فقط IPv4 را پوشش می‌دهد. پورت‌های لازم را در فایروال ارائه‌دهنده هم باز کنید.
+
 در پنل کاربر راهنمای تصویری و پروفایل‌های قابل دریافت قرار دارد. Android فایل `.sswan` را در strongSwan VPN Client وارد می‌کند؛ iPhone فایل `.mobileconfig` را نصب می‌کند؛ در Windows، اتصال IKEv2 از VPN Settings ساخته و CA روی دستگاه مورداعتماد می‌شود. تصاویر راهنما از مستندات و راهنماهای پلتفرم‌ها هستند و پیوند منبع کنار هر تصویر درج شده است. WireGuard از پنل کاربر برای هر دستگاه یک فایل پیکربندی مستقل می‌سازد؛ آن فایل حاوی کلید خصوصی است و باید مانند رمز محرمانه نگهداری شود.
 
-حداقل طول رمز کاربران VPN دوازده نویسه و حداقل طول رمز مدیر چهارده نویسه است. برای احراز هویت IKEv2، رمز VPN در پایگاه دادهٔ محدودشده و فهرست محلی FreeRADIUS به‌شکل قابل‌بازیابی نگهداری می‌شود؛ رمز مدیر با scrypt و salt هش می‌شود. UDP پورت 51820 را علاوه بر فایروال سیستم در پنل شبکهٔ ارائه‌دهندهٔ VPS نیز باز کنید.
+حداقل طول رمز کاربران VPN چهار نویسه و حداقل طول رمز مدیر چهارده نویسه است. برای احراز هویت IKEv2، رمز VPN در پایگاه دادهٔ محدودشده و فهرست محلی FreeRADIUS به‌شکل قابل‌بازیابی نگهداری می‌شود؛ رمز مدیر با scrypt و salt هش می‌شود. پورت‌های TCP/UDP شمارهٔ 8443 را برای OpenConnect و UDP شمارهٔ 51820 را برای WireGuard علاوه بر فایروال سیستم در پنل شبکهٔ ارائه‌دهندهٔ VPS نیز باز کنید.
 
 ### بکاپ و انتقال به VPS دیگر
 
@@ -116,6 +119,7 @@ Forge Connect is a bilingual web panel for deploying and managing a self-hosted 
 
 - strongSwan IKEv2 with EAP authentication through FreeRADIUS
 - WireGuard with a separate client profile for each device
+- OpenConnect/ocserv with shared FreeRADIUS authentication and accounting
 - Server certificate and root CA generation
 - IPv4 NAT and optional IPv6 when the VPS has a working public IPv6 route
 - UFW rules that preserve the SSH port and open VPN/web ports
@@ -137,10 +141,10 @@ The web app listens only on `127.0.0.1:15151`; Nginx provides the public HTTPS e
 
 - A fresh Ubuntu Server 24.04 LTS VPS with root access
 - A DNS A record pointing to the VPS public IPv4 address
-- Inbound TCP ports 80 and 443, and UDP ports 500, 4500, and 51820
+- Inbound TCP ports 80, 443, and 8443; UDP ports 500, 4500, 51820, and 8443
 - If your provider has a separate firewall or security group, allow the same ports there
 
-The installer refuses to overwrite an existing strongSwan setup or another Nginx site. The initial system packages, certificates, and services are configured by the installer; routine account management is done in the web panel.
+The installer refuses to overwrite an existing strongSwan, ocserv, or Nginx site setup. It installs IKEv2, WireGuard, OpenConnect, persistent IPv4/IPv6 forwarding and NAT (when IPv6 is available), UFW rules, Nginx, HTTPS, and the panel. Routine account management is done in the web panel.
 
 ### First installation
 
@@ -160,17 +164,19 @@ sudo VPN_DOMAIN=vpn.example.com ACME_EMAIL=admin@example.com bash ./install.sh
 
 ### Web panel operations
 
-Use the panel to create accounts and set per-user quota, validity, protocols, and IKEv2 connection limits. Configure Telegram sales, plans, payment details, receipt review, and renewal requests from Settings. Give each user the `/portal` address and their initial credentials. Users can view usage and expiry, change their password, request renewal, and download device profiles. A new VPN password is shown only once when created or reset.
+Use the panel to create accounts and set per-user quota, validity, protocols, and session limits. Configure Telegram sales, plans, payment details, receipt review, and renewal requests from Settings. Give each user the `/portal` address and their initial credentials. Users can view usage and expiry, change their password, request renewal, and download device profiles. A new VPN password is shown only once when created or reset.
 
-IKEv2 limits use FreeRADIUS Simultaneous-Use. WireGuard limits the number of active device profiles for each account; WireGuard does not expose the same RADIUS-style per-login session model, so the two protocol limits are not one shared cross-protocol counter in this release.
+IKEv2 and OpenConnect session limits use FreeRADIUS Simultaneous-Use and session accounting. WireGuard limits the number of active device profiles for each account; WireGuard does not expose the same RADIUS-style per-login session model, so its limit is not a shared counter with the other protocols.
 
 Adding a new domain or moving the service to another VPS still requires updating DNS and the provider's network access. Server migration is covered by the backup/restore workflow. The current panel does not provide unrestricted operating-system or provider-firewall editing.
+
+OpenConnect uses `8443/TCP+UDP` with a default full-tunnel route. The installer persists forwarding and NAT rules for the VPN pools and configures tunnel DNS. If the VPS has working public IPv6 routing, an IPv6 pool and IPv6 forwarding/NAT are enabled too. Without public IPv6 on the VPS, the tunnel covers IPv4 only. Provider firewall rules still need to allow the required ports.
 
 ### Client setup
 
 The user portal includes illustrated setup guides and downloadable profiles. Android imports the `.sswan` file into strongSwan VPN Client; iPhone installs the `.mobileconfig` profile; Windows uses the built-in IKEv2 VPN settings and trusts the CA certificate. Screenshot sources and platform instructions are linked beside each image. WireGuard creates a separate config file per device in the portal; it contains the private key and must be kept secret.
 
-VPN passwords must be at least 12 characters; administrator passwords must be at least 14 characters. IKEv2 authentication requires recoverable VPN passwords, so they are stored in the restricted database and local FreeRADIUS users file. Administrator passwords are salted scrypt hashes. Also allow UDP 51820 in the VPS provider firewall for WireGuard.
+VPN passwords must be at least 4 characters; administrator passwords must be at least 14 characters. IKEv2 authentication requires recoverable VPN passwords, so they are stored in the restricted database and local FreeRADIUS users file. Administrator passwords are salted scrypt hashes. Also allow TCP and UDP 8443 in the VPS provider firewall for OpenConnect, and UDP 51820 for WireGuard.
 
 ### Back up and migrate
 

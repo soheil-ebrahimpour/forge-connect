@@ -55,7 +55,13 @@ def collect():
         if enabled and exhausted:
             c.execute('UPDATE vpn_users SET enabled=0 WHERE id=?',(uid,));disabled.append(username)
     c.commit()
-    users=[{'username':u,'password':p,'maxConnections':m} for u,p,m in c.execute('SELECT username,vpn_password,max_connections FROM vpn_users WHERE enabled=1 AND (expires_at IS NULL OR expires_at>?) AND (quota_bytes=0 OR used_up_bytes+used_down_bytes<quota_bytes) AND instr(','||protocols||',',',ikev2,')>0',(now,))]
+    users=[]
+    for u,p,m,protocols in c.execute('''SELECT username,vpn_password,max_connections,protocols FROM vpn_users
+      WHERE enabled=1 AND (expires_at IS NULL OR expires_at>?)
+      AND (quota_bytes=0 OR used_up_bytes+used_down_bytes<quota_bytes)
+      AND (instr(','||protocols||',',',ikev2,')>0 OR instr(','||protocols||',',',ocserv,')>0)''',(now,)):
+        users.append({'username':u,'password':p,'maxConnections':m,
+                      'protocols':[x for x in protocols.split(',') if x in ('ikev2','ocserv')]})
     wg_peers=[{'publicKey':k,'address':a} for k,a in c.execute('''SELECT w.public_key,w.assigned_ip FROM wireguard_peers w JOIN vpn_users u ON u.id=w.vpn_user_id WHERE w.revoked=0 AND u.enabled=1 AND (u.expires_at IS NULL OR u.expires_at>?) AND (u.quota_bytes=0 OR u.used_up_bytes+u.used_down_bytes<u.quota_bytes) AND instr(','||u.protocols||',',',wireguard,')>0''',(now,))]
     c.close()
     if disabled:
